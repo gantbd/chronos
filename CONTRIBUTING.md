@@ -10,7 +10,8 @@ Run the complete non-GUI workspace gate before submitting changes:
 make check
 ```
 
-The sibling TUI, GUI, and excluded Vellum-capture integration have separate
+The gates require `ripgrep` (`rg`). The sibling TUI, GUI, and excluded
+Vellum-capture integration have separate
 qualification. Their absence or failure is never credited to the core gate.
 
 - Preserve closed, bounded, versioned domains and content-safe diagnostics.
