@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "channel": "github-coordinated-source",
+  "chronosRepository": "https://github.com/gantbd/chronos",
+  "remoteReachabilityQualified": false,
+  "scope": "non-gui-core-workspace",
+  "excludedProfiles": {
+    "presentations": "separate repositories and gates",
+    "vellumCapture": "blocked on sibling Vellum dependency remediation"
+  },
+  "publishing": {
+    "cratesIo": "none-authorized",
+    "binaries": "none",
+    "signing": "none"
+  }
+}

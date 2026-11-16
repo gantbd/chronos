@@ -1,8 +1,8 @@
 # Current v0.3 source-profile readiness
 
-Status: qualified owner-approved private-local source candidate as of 2026-11-10;
-trusted native worker extension qualified separately the same day; not a
-supported packaged production release.  
+Status: qualified owner-approved private-local source candidate preparing for
+public GitHub source distribution; trusted native worker extension qualified
+separately; not a supported packaged production release.
 Baseline reconciled: 2026-11-10. Historical v0.1/v0.2 ledgers remain unchanged.
 
 Subsequent C-phase core source additions, including V4 original-allocation

@@ -1,4 +1,4 @@
-.PHONY: check check-profile check-local-profile check-worker-profile qualify-native-workers qualify-local-runtime qualify-local-performance measure-local-latency check-all fmt lint test doc integration-check presentations-check qualify-gui package portability dependency-baseline boundaries performance fuzz mutation-smoke formal mutation audit dependencies check-release
+.PHONY: check check-public-source check-profile check-local-profile check-worker-profile qualify-native-workers qualify-local-runtime qualify-local-performance measure-local-latency check-all fmt lint test doc integration-check presentations-check qualify-gui package portability dependency-baseline boundaries performance fuzz mutation-smoke formal mutation audit dependencies check-release
 .PHONY: check-source-bundle
 .PHONY: check-vellum-capture
 
@@ -12,7 +12,10 @@ check-source-bundle:
 	cargo test -p chronos-client --example source-bundle --locked --offline
 	cargo clippy -p chronos-client --example source-bundle --locked --offline -- -D warnings
 
-check: fmt lint test doc dependency-baseline check-profile
+check: check-public-source fmt lint test doc dependency-baseline check-profile
+
+check-public-source:
+	bash scripts/check-public-source.sh
 
 check-profile:
 	cargo test -p chronos-client --test workspace_boundary --test dependency_boundary --test profile_baseline --locked --offline
