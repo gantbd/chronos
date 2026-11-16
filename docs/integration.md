@@ -247,6 +247,22 @@ not gain a second privileged path. The private-process gate covers discarded
 reply, scoped reconciliation, exact allocation, preserved eligibility and
 read-only restart.
 
+### Retained scheduled cancellation V8 (opt-in)
+
+`protocol::coordination_v8` and `client::ScheduledCancellationWireClientV8`
+cancel one exact task reference under an expected task-state revision and a new
+retained invocation identity. `LookupCancellation` repeats the complete
+canonical cancellation scope but cannot admit a missing serial. It is therefore
+safe for explicit reconciliation after an unknown delivery outcome; execute is
+still refused after a read-only restart while lookup remains available.
+
+V8 is intentionally separate from V7 admission. An `Applied` retained outcome
+proves the Chronos task reached cancellation exactly once. It does not prove an
+external executor stopped, release concurrency reservations, or establish that
+Agora, Hermes or another peer did not already accept an effect. Those
+compositions must retain their own offer cuts and reconcile their own
+authoritative receipt.
+
 ### Native original-allocation facet (opt-in)
 
 `chronos_host::native_allocation::AllocationClientV1` exposes a typed retained

@@ -163,6 +163,40 @@ impl chronos_client::ScheduledAdmissionWireClientV7 for LocalClient {
         Ok(response)
     }
 }
+impl chronos_client::ScheduledCancellationWireClientV8 for LocalClient {
+    type Error = CallError;
+    fn request_scheduled_cancellation_v8(
+        &mut self,
+        request: chronos_wire::coordination_v8::Request,
+    ) -> Result<chronos_wire::coordination_v8::Response, CallError> {
+        request
+            .validate(wire_limits())
+            .map_err(|_| CallError::NotSent)?;
+        let bytes =
+            chronos_wire::encode(&request, MAX_REQUEST_BYTES).map_err(|_| CallError::NotSent)?;
+        let path = verify_socket(&self.directory).map_err(|_| CallError::NotSent)?;
+        let mut stream = UnixStream::connect(path).map_err(|_| CallError::NotSent)?;
+        stream
+            .set_read_timeout(Some(IO_TIMEOUT))
+            .map_err(|_| CallError::NotSent)?;
+        stream
+            .set_write_timeout(Some(IO_TIMEOUT))
+            .map_err(|_| CallError::NotSent)?;
+        stream
+            .write_all(&bytes)
+            .and_then(|()| stream.write_all(b"\n"))
+            .map_err(|_| CallError::OutcomeUnknown)?;
+        let frame = chronos_wire::read_frame(&mut BufReader::new(stream), MAX_RESPONSE_BYTES)
+            .map_err(|_| CallError::OutcomeUnknown)?
+            .ok_or(CallError::OutcomeUnknown)?;
+        let response = chronos_wire::decode_response_v8(&frame, MAX_RESPONSE_BYTES)
+            .map_err(|_| CallError::InvalidResponse)?;
+        response
+            .validate_for(&request, wire_limits())
+            .map_err(|_| CallError::InvalidResponse)?;
+        Ok(response)
+    }
+}
 impl LocalClient {
     pub fn new(directory: impl Into<PathBuf>) -> Self {
         Self {

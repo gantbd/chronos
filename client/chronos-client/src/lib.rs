@@ -10,6 +10,14 @@ pub trait ScheduledAdmissionWireClientV7 {
         request: chronos_protocol::coordination_v7::Request,
     ) -> Result<chronos_protocol::coordination_v7::Response, Self::Error>;
 }
+/// Exact retained cancellation and non-admitting lost-reply reconciliation.
+pub trait ScheduledCancellationWireClientV8 {
+    type Error;
+    fn request_scheduled_cancellation_v8(
+        &mut self,
+        request: chronos_protocol::coordination_v8::Request,
+    ) -> Result<chronos_protocol::coordination_v8::Response, Self::Error>;
+}
 /// Explicit opt-in. Execution-stop attestations are deliberately absent.
 pub trait SchedulingWireClientV5 {
     type Error;

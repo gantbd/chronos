@@ -310,6 +310,200 @@ fn scheduled_v7_lost_reply_reconciles_without_partial_claimability_or_reexecutio
 }
 
 #[test]
+fn scheduled_v8_cancellation_lost_reply_reconciles_exactly_without_reexecution() {
+    use chronos_client::{
+        ScheduledAdmissionWireClientV7, ScheduledCancellationWireClientV8, SchedulingWireClientV5,
+        WireClientV4,
+    };
+    use chronos_wire::{
+        Phase, coordination_v4 as v4, coordination_v7 as v7, coordination_v8 as v8,
+        scheduling_v5 as v5,
+    };
+    use std::io::Write;
+
+    let directory = Directory::new();
+    let server = Running::start_flags(
+        &directory.0,
+        &["--atomic-state", "--allocation-receipts", "--allow-writes"],
+    );
+    let mut client = LocalClient::new(&directory.0);
+    assert!(matches!(
+        client
+            .request_scheduling_v5(v5::Request {
+                version: 5,
+                command: v5::Command::Enable {
+                    expected: Revision::Finite("0".into()),
+                },
+            })
+            .unwrap()
+            .outcome,
+        v5::Outcome::Control {
+            result: v5::ControlResult::Applied {}
+        }
+    ));
+    assert!(matches!(
+        client
+            .request_scheduled_admission_v7(v7::Request {
+                version: 7,
+                command: v7::Command::ExecuteScheduledGraph {
+                    invocation: v7::Invocation {
+                        serial: "1".into(),
+                        key: "schedule-intent".into(),
+                    },
+                    expected: Revision::Finite("1".into()),
+                    tasks: vec![v7::ScheduledTask {
+                        task: TaskSpec {
+                            id: "scheduled-cancel".into(),
+                            priority: 0,
+                            dependencies: vec![],
+                            capabilities: vec![],
+                            max_attempts: 1,
+                            retry_safety: RetrySafety::FenceUnknown,
+                        },
+                        eligibility: v5::Eligibility {
+                            paused: true,
+                            not_before: None,
+                        },
+                    }],
+                },
+            })
+            .unwrap()
+            .outcome,
+        v7::Outcome::InvocationResult {
+            result: v7::MutationResult::Applied {},
+            ..
+        }
+    ));
+    let allocation = client
+        .request_v4(v4::Request {
+            version: 4,
+            command: v4::Command::LookupAllocation {
+                serial: "1".into(),
+                key: "schedule-intent".into(),
+            },
+        })
+        .unwrap();
+    let v4::Outcome::Allocation {
+        revision,
+        mut tasks,
+        ..
+    } = allocation.outcome
+    else {
+        panic!("allocation expected")
+    };
+    assert_eq!(tasks.len(), 1);
+    let task = tasks.pop().unwrap();
+    let execute = || v8::Request {
+        version: 8,
+        command: v8::Command::ExecuteCancellation {
+            invocation: v8::Invocation {
+                serial: "2".into(),
+                key: "cancel-intent".into(),
+            },
+            expected: revision.clone(),
+            task: task.clone(),
+        },
+    };
+    let lookup = || v8::Request {
+        version: 8,
+        command: v8::Command::LookupCancellation {
+            invocation: v8::Invocation {
+                serial: "2".into(),
+                key: "cancel-intent".into(),
+            },
+            expected: revision.clone(),
+            task: task.clone(),
+        },
+    };
+
+    let mut stream =
+        std::os::unix::net::UnixStream::connect(chronos_local::socket_path(&directory.0)).unwrap();
+    stream
+        .write_all(&chronos_wire::encode(&execute(), chronos_local::MAX_REQUEST_BYTES).unwrap())
+        .unwrap();
+    stream.write_all(b"\n").unwrap();
+    stream.shutdown(std::net::Shutdown::Write).unwrap();
+    chronos_wire::read_frame(
+        &mut BufReader::new(stream),
+        chronos_local::MAX_RESPONSE_BYTES,
+    )
+    .unwrap()
+    .unwrap();
+    let files = || {
+        std::fs::read_dir(&directory.0)
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("service-")
+            })
+            .count()
+    };
+    let before = files();
+    assert!(matches!(
+        client
+            .request_scheduled_cancellation_v8(lookup())
+            .unwrap()
+            .outcome,
+        v8::Outcome::CancellationResult {
+            result: v8::CancellationResult::Applied {},
+            ..
+        }
+    ));
+    assert_eq!(
+        files(),
+        before,
+        "scoped lookup did not republish cancellation"
+    );
+    assert!(matches!(
+        client
+            .request(Request {
+                version: 1,
+                command: Command::Snapshot {
+                    task: "scheduled-cancel".into(),
+                },
+            })
+            .unwrap()
+            .outcome,
+        Outcome::Snapshot {
+            value: Some(chronos_wire::Entry {
+                reference,
+                snapshot: chronos_wire::Snapshot {
+                    phase: Phase::Cancelled,
+                    ..
+                },
+            }),
+            ..
+        } if reference.task == task.task && reference.incarnation == task.incarnation
+    ));
+
+    drop(server);
+    let _readonly = Running::start(&directory.0, false);
+    assert!(matches!(
+        client
+            .request_scheduled_cancellation_v8(lookup())
+            .unwrap()
+            .outcome,
+        v8::Outcome::CancellationResult {
+            result: v8::CancellationResult::Applied {},
+            ..
+        }
+    ));
+    assert!(matches!(
+        client
+            .request_scheduled_cancellation_v8(execute())
+            .unwrap()
+            .outcome,
+        v8::Outcome::Refused {
+            code: v8::RefusalCode::Unauthorized
+        }
+    ));
+}
+
+#[test]
 fn exact_cancellation_receipt_recovers_lost_reply_without_another_effect() {
     use chronos_client::WireClientV3;
     use chronos_wire::{Phase, coordination_v3 as v3};

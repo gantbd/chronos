@@ -4,6 +4,7 @@ pub mod coordination_v2;
 pub mod coordination_v3;
 pub mod coordination_v4;
 pub mod coordination_v7;
+pub mod coordination_v8;
 pub mod scheduling_v5;
 #[derive(Debug)]
 pub enum EmbeddedError<E> {
