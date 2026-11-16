@@ -9,7 +9,7 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-chronos-engine = { path = ".." }
+chronos-engine = { path = "../engine/chronos-engine" }
 
 [[bin]]
 name = "checkpoint_decode"

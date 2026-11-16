@@ -1,0 +1,24 @@
+[package]
+name = "chronos-engine"
+version = "0.3.0"
+edition = "2024"
+rust-version = "1.95"
+description = "A UI-agnostic task scheduling engine for coordinating autonomous agents"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/gantbd/chronos"
+homepage = "https://github.com/gantbd/chronos"
+documentation = "https://docs.rs/chronos-engine"
+readme = "README.md"
+keywords = ["scheduler", "agents", "workflow", "leases", "recovery"]
+categories = ["asynchronous", "data-structures"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

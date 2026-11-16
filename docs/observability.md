@@ -43,6 +43,45 @@ explicitly defined end-to-end measurement.
 
 ## Privacy and cardinality
 
+### Trusted worker service boundary
+
+`WorkerSignalsV1` has fixed operation counters, policy/domain/empty/withheld
+populations, per-operation residence histograms and four nested stage timing
+populations: admission, engine preparation, publication and result release.
+Residence excludes host queueing, transport delivery and external execution.
+Checkpoint preparation includes the sealed transition and checkpoint encoding;
+atomic-envelope publication includes checkpoint/envelope encoding, store commit,
+receipt validation and feed publication. Stages therefore describe those named
+boundaries, not pure CPU or filesystem service times. Do not sum nested timings
+with residence or use renewals as executor-progress measurements.
+
+`worker_usage(now)` samples existing engine phase/resource/capacity values using
+an explicit advisory instant; it does not advance time or authorize expiry.
+Saturation tests cover grant capacity/reclamation, histogram boundaries and
+counter/time overflow. Fenced worker usage/signals are `None`; consult outer
+persistence/atomic failure signals rather than fabricating post-fence zeros.
+Zero stage samples means no measurement, not instantaneous storage. There is no
+invented queue, CPU, RSS, export success, durable audit or provider completion.
+
+MELT exporters/logs/spans remain host-owned optional projections over the closed
+operation/outcome vocabulary and call boundaries; no telemetry backend, arbitrary
+content labels or unbounded event buffer is introduced. RED/golden derive from
+actual counts, latency populations, refusals/fences and usage; USE covers funded
+logical capacity, not unmeasured hardware utilization. Observation loss or
+saturation cannot authorize, retry, reconcile or change a command result.
+
+STRIDE: separate admission/release decisions prevent privilege fallback;
+engine-scoped grant/lease/time and exact revision/incarnation checks reject
+substitution/stale authority; bounded native inputs precede cloning; receipt
+failure fences all access. Counters are not nonrepudiation or effect evidence.
+LINDDUN: no task/principal/capability labels or content enter these exports, but
+aggregate counts/timing still reveal activity and may be linkable. Signals are
+trusted-host-only, not new remotely queryable endpoints. Export notice, access,
+retention and compliance policy remain host duties, not claimed solved by
+minimization. Native worker grants/leases never enter JSON or executor receipts.
+
+## Domain observation privacy
+
 `Observation` deliberately excludes task IDs, summaries, failure reasons, agent
 IDs, capabilities, dependency IDs, and connector locators. Exporters must use the
 closed enum labels and must not add those domain values as labels. Domain `Debug`

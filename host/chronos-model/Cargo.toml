@@ -1,0 +1,20 @@
+[package]
+name = "chronos-model"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chronos-client.workspace = true
+chronos-protocol.workspace = true
+
+[dev-dependencies]
+chronos-host.workspace = true
+chronos-adapter-native.workspace = true
+chronos-engine.workspace = true
+chronos-service.workspace = true
+
+[lints]
+workspace = true

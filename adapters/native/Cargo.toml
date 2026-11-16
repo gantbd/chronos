@@ -1,0 +1,16 @@
+[package]
+name = "chronos-adapter-native"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chronos-engine.workspace = true
+chronos-host.workspace = true
+chronos-client.workspace = true
+chronos-wire.workspace = true
+
+[lints]
+workspace = true

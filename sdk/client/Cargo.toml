@@ -1,0 +1,17 @@
+[package]
+name = "chronos-sdk-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Engine-free Chronos remote client distribution facade"
+
+[dependencies]
+chronos-client.workspace = true
+chronos-protocol.workspace = true
+chronos-wire.workspace = true
+chronos-local.workspace = true
+
+[lints]
+workspace = true

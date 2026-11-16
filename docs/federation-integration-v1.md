@@ -33,6 +33,20 @@ incarnation after legitimate retirement.
 
 ## Attempt attribution
 
+Public-client admission consumers can now query the original retained allocation
+through Chronos's V4 profile after V3 submission/lookup. Keep the prepared intent,
+invocation and host-established service correspondence; use the returned original
+task incarnation and allocation revision. Snapshot-by-name is current-state
+inspection and cannot reconstruct historical admission after retirement/reuse.
+Uncaptured or expired allocation history requires explicit reconciliation, never
+resubmission or guessing an incarnation. Capture requires the standalone owner's
+explicit atomic-envelope allocation profile before the original admission.
+Moira's public admission adapter now composes V3 invocation lookup with V4
+original-allocation lookup on the same host-bound service. Its isolated process
+qualification discards the execute reply, restarts Chronos, retires the original
+task, reuses its descriptive name and still recovers the original incarnation
+and admission revision without a snapshot fallback or mutation replay.
+
 `TaskAttemptRefV1` is `(TaskRefV1, attempt_number)`. Non-reusing task
 incarnations and monotone per-task attempt numbers make it a stable correlation
 value. It survives checkpoint recovery even though recovery invalidates the old
@@ -52,7 +66,8 @@ semantics, and Hermes qualification; audit records must not be repurposed.
 
 ## Keystone qualification
 
-No new Keystone runtime dependency is adopted by this profile:
+The engine's dependency-free profile remains unchanged. The original comparison
+below concerns engine/domain migration, not the later service-layer gate reuse:
 
 - `keystone-effects` is exhaustively equivalent to Chronos `EffectKnowledge`,
   but Chronos retains its local type to preserve the one-package, zero-runtime-
@@ -66,6 +81,26 @@ No new Keystone runtime dependency is adopted by this profile:
 Reuse remains evidence-driven. A migration requires semantic comparison,
 cross-project executable correspondence, compatibility analysis, and green gates
 in Keystone and every affected consumer.
+
+On 2026-11-10 the atomic service adopted the narrow Keystone `CommitGate`
+post-offer publication law. It does not adopt Keystone storage/directory semantics
+or its non-evicting replay register. A licensed local source-package snapshot,
+origin/base-commit/dirty-state record and source/manifest hashes keep the Chronos
+workspace self-contained; the imported source is explicitly not an immutable
+upstream release. Consumer tests cover all three Chronos strength classes,
+exact-successor receipt validation and existing absorbing service fencing.
+
+The opt-in native allocation facet preserves original `(TaskId, incarnation)`
+sets with the accepted task-state revision in service-envelope V2. V1 remains
+the default, with explicit host upgrade and no invented receipts for old records.
+The query follows namespace, retained-command and receipt-specific current
+authorization. Retention remains Chronos FIFO/high-water, not Keystone full-only
+behavior. Original references remain observations after task retirement/reuse;
+they grant no authority or claim that a retired task is currently present.
+The receipt is scoped to its service register and invocation, not a globally
+unique federated identity. An integration must preserve that binding alongside
+the Vellum-owned source identity/version/anchor. Document content, provenance
+mapping, cross-component recovery and workflow policies remain outside Chronos.
 
 ## Required adapter scenarios
 

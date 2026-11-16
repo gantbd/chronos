@@ -1,2 +1,5 @@
 /target/
+/third_party/*/target/
 /fuzz/target/
+/integration/target/
+/integration/vellum-capture/target/

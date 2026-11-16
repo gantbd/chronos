@@ -1,0 +1,21 @@
+[package]
+name = "chronos-mcp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chronos-client.workspace = true
+chronos-local.workspace = true
+chronos-wire.workspace = true
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = { version = "=1.0.151", features = ["raw_value"] }
+
+[dev-dependencies]
+chronos-standalone = { path = "../../applications/chronos-daemon" }
+chronos-model.workspace = true
+
+[lints]
+workspace = true

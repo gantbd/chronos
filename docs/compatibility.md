@@ -25,9 +25,11 @@ is durably accepted, and fixtures cover supported old versions, corrupt/truncate
 records, interrupted migration, and downgrade refusal.
 
 Recovery checkpoint V1 is the first persisted format. Its canonical minimal
-fixture is `tests/fixtures/checkpoint-v1-minimal.hex`; later implementations must
+fixture is `engine/chronos-engine/tests/fixtures/checkpoint-v1-minimal.hex`; later implementations must
 continue decoding it and must introduce a new version for incompatible layout or
-semantic changes. No stable dynamic command or connector wire protocol exists.
+semantic changes. No stable wire encoding exists for the full engine command
+algebra. The unpublished bounded coordination JSON V1 subset is separately
+owned by `chronos-protocol`/`chronos-wire`; it does not expose grants or leases.
 Grant authority and its epoch are deliberately absent from V1; recovery always
 requires fresh issuance and changing that rule requires an explicit new profile.
 

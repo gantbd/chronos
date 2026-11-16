@@ -1,0 +1,22 @@
+[package]
+name = "chronos-sdk-embedded"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Trusted in-process Chronos embedding distribution facade"
+
+[dependencies]
+chronos-engine.workspace = true
+chronos-host.workspace = true
+chronos-service.workspace = true
+chronos-adapter-native.workspace = true
+chronos-client.workspace = true
+chronos-protocol.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+chronos-adapter-checkpoint.workspace = true

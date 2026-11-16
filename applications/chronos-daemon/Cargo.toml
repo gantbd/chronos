@@ -1,0 +1,29 @@
+[package]
+name = "chronos-standalone"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "chronos-service"
+path = "src/main.rs"
+doc = false
+
+[dependencies]
+rustix = { version = "=1.1.4", features = ["process", "fs", "event"] }
+signal-hook = { version = "=0.3.18", default-features = false, features = ["iterator"] }
+chronos-adapter-native.workspace = true
+chronos-engine.workspace = true
+chronos-host.workspace = true
+chronos-service.workspace = true
+chronos-wire.workspace = true
+chronos-local.workspace = true
+chronos-adapter-checkpoint.workspace = true
+
+[dev-dependencies]
+chronos-client.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,49 @@
+[workspace]
+members = ["."]
+resolver = "3"
+
+[package]
+name = "chronos-vellum-capture"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Explicit native document-to-task capture composition"
+
+[features]
+workbench = ["dep:chronos-tui", "dep:workbench-tui", "dep:chronos-local", "dep:vellum-adapter-local-fs"]
+
+[dependencies]
+chronos-client = { path = "../../client/chronos-client", version = "=0.1.0" }
+chronos-protocol = { path = "../../protocol/chronos-protocol", version = "=0.1.0" }
+chronos-sdk-embedded = { path = "../../sdk/embedded", version = "=0.1.0" }
+vellum-workspace = { path = "../../../vellum/host/vellum-workspace", version = "=0.1.0" }
+vellum-host = { path = "../../../vellum/host/vellum-host", version = "=0.1.0" }
+keystone-storage = { path = "../../third_party/keystone-storage-0.0.1", version = "=0.0.1" }
+keystone-observe = { path = "../../../keystone/crates/keystone-observe", version = "=0.0.1" }
+chronos-adapter-checkpoint = { path = "../../adapters/checkpoint", version = "=0.1.0" }
+vellum-engine = { path = "../../../vellum/engine/vellum-engine", version = "=0.1.0" }
+
+[[bin]]
+name = "vellum-chronos-workbench"
+path = "src/bin/workbench.rs"
+required-features = ["workbench"]
+
+[target.'cfg(target_os = "macos")'.dependencies]
+chronos-local = { path = "../../transport/chronos-local", version = "=0.1.0", optional = true }
+vellum-adapter-local-fs = { path = "../../../vellum/adapters/local-fs", version = "=0.1.0", optional = true }
+chronos-tui = { path = "../../../chronos-tui", version = "=0.1.0", optional = true }
+workbench-tui = { path = "../../../workbench-tui", version = "=0.1.0", optional = true }
+vellum-protocol = { path = "../../../vellum/protocol/vellum-protocol", version = "=0.1.0" }
+vellum-service = { path = "../../../vellum/service/vellum-service", version = "=0.1.0" }
+rustix = { version = "=1.1.4", features = ["fs", "process"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+chronos-local = { path = "../../transport/chronos-local", version = "=0.1.0" }
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+vellum-adapter-local-fs = { path = "../../../vellum/adapters/local-fs", version = "=0.1.0" }
+
+[lints.rust]
+unsafe_code = "forbid"

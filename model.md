@@ -175,6 +175,112 @@ class. Work content and raw connector keys are intentionally not members.
 Detailed failures project into the closed scheduler class before admission.
 
 The bounded exhaustive V2 abstraction in
-`tests/exhaustive_coordination_model.rs` is independent of this production
+`engine/chronos-engine/tests/exhaustive_coordination_model.rs` is independent of this production
 representation and explores incarnation reuse attempts, retirement, uncertainty,
 time, grant budgets, and revocation.
+
+## Trusted native worker mediation (C4/R3)
+
+The worker profile is a closed thirteen-variant sublanguage of existing engine
+V2 commands, not a new task FSM or scheduler. One service engine owner interprets
+coordination and worker commands. Native capabilities stay inside the trusted
+host; executor attempt references are correlation only.
+
+```mermaid
+flowchart LR
+    H[Trusted host] --> A[Current admission policy and input bounds]
+    A --> E[Existing engine V2 transition]
+    E --> P[Sealed or privately held successor and outcome]
+    P --> S[Qualified checkpoint or envelope publication]
+    S --> R[Current result-release policy]
+    R --> H
+    H -->|Attempt reference and separately authorized context| X[External synthetic executor]
+    X -->|Correlated result or independent reconciliation evidence| H
+```
+
+Volatile interpretation omits the storage boundary and makes no durable claim.
+Checkpoint interpretation uses `PreparedTransitionV2`; envelope interpretation
+holds authority privately until its existing strong receipt validates. Failure
+drops held authority and fences the service. Recovery preserves attempt facts,
+replaces grant/lease/time authority, and fences in-flight effects as uncertain.
+Result withholding is not admission denial or permission to retry. Native worker
+outcomes are not inserted into the coordination invocation replay FIFO.
+
+Instrumentation sits at admission, engine preparation, publication and release;
+per-operation residence and bounded resource/phase gauges are passive host
+observations. No telemetry or executor callback enters the pure engine. The
+existing engine algebra/finite models are unchanged; native lifecycle, receipt,
+process-loss and instrumentation tests qualify this interpreter boundary, not
+an arbitrary-history proof or distributed/external-effect exactly-once theorem.
+
+## Selected scheduling controls and fixed concurrency profile
+
+The native opt-in profile composes existing task/lease transitions with finite
+eligibility controls and a bounded attempt-reservation set. Global or per-task
+pause prevents new claims; `not_before` compares against caller-supplied time.
+Neither changes lease renewal, completion, expiry or external process state.
+Control commands use exact state revisions and task-incarnation guards. Enabling
+the profile selects checkpoint V3; default engines still emit V2 and retain V1
+decoding. The in-flight source profile now has a separate opt-in V5 scheduling
+projection through embedded/private Unix clients. Its closed vocabulary exposes
+observations and guarded controls, with no worker or quiescence-attestation verb.
+Legacy local storage refuses this profile; atomic state is selected explicitly.
+
+A configured positive capacity bounds the reservation set. Each successful claim
+adds its exact task-incarnation/attempt reference before publication. Saturation
+refuses before consuming a grant claim or attempt identity. Cancellation, expiry,
+effect completion, retirement and process recovery do not remove reservations.
+An authorized host must separately confirm execution quiescence, after the lease
+is no longer running, before a reservation is released. An unknown effect can
+remain unresolved after its stopped execution releases capacity. These facts
+must never be collapsed into one task-state boolean.
+
+Reservations survive retirement/name reuse and are inspectable through bounded
+revision-consistent native pages. First activation of concurrency refuses engines
+with historical attempts; it does not invent their quiescence or silently migrate
+them. Native service admission, engine, publication and result release retain
+separate content-free counters/timing samples. Existing physical storage/host
+evidence premises apply; there is no CPU/RSS isolation or arbitrary-history proof.
+The standalone's ordinary write policy explicitly refuses quiescence. Only a
+trusted native host with independent executor-stop evidence can release capacity.
+Service stage signals flow through RuntimeSignals. The MCP scheduling tool and
+shared human-client model now consume this projection outside the engine. The
+model separates observation, proposal and one-time confirmation, rejects mixed
+revision reads and discards plans on selection/view changes. Both use bounded
+content-free interface measurements; transport waits stay on the UI worker.
+The terminal/macOS components now opt into this workflow independently, retaining
+forms and gestures at their presentation edges. Headless journeys exercise the
+same service and a private-process terminal snapshot qualifies actual transport.
+The new macOS controls remain visually unqualified; no desktop was opened.
+
+## Text continuity at the document/integration boundary
+
+Readable work intent/context remains in ordinary text owned by the document or
+integration layer. Chronos retains finite coordination state; its checkpoint and
+the native capture journal are not substitutes for a work document. Org-style
+headings, stable item IDs, local properties, links and notes are useful precedents;
+Org/Markdown syntax adapters remain outside the engine. Existing source format is
+preserved; no canonical file syntax or automatic format conversion is selected.
+
+An offline human/agent can read context and record progress in independent tools.
+The text carries explicit last-observed coordination facts separately from
+authored changes. Reconnection compares source versions and exact service/task
+incarnations, then presents bounded permitted changes or conflicts. A checkmark,
+old RUNNING label or copied attempt ID cannot restore lease authority, certify an
+external effect, or release capacity. The handoff has to remain understandable
+without resolving opaque application-only identities.
+
+The separate Vellum capture integration now implements bounded lossless export,
+readable work context, a three-way offline source review and exact service/task
+incarnation checks. Its synthetic file example works after both engine owners
+are dropped. Full-source disclosure has its own current authority gate; proposals
+carry the current source version and cannot execute a coordination command.
+Content-free counters/gauges and a bounded residence histogram observe this edge.
+The separate bounded handoff carrier retains exact baseline/card and observed
+correlation across process exit. Reloaded metadata is explicitly unverified even
+when identifiers/revisions match; strict parsing is not provenance or authority.
+Readable source and card remain independently usable. The macOS integration
+publishes the complete staged handoff at one exclusive final directory name
+under a host-authorized private local parent. The host confirms a guarded
+source proposal through Vellum's current edit contract. Offline checkmarks
+remain authored progress rather than coordination mutations.

@@ -1,8 +1,10 @@
 # Chronos requirements
 
-Status: v0.2 coordination-kernel source profile, retaining the v0.1 compatibility
-surface. External integration obligations and excluded profiles are not
-guarantees; see the release-readiness ledgers.
+Status: engine v0.3 source/API boundary retaining the v0.2 coordination semantics,
+v0.1/v0.2 checkpoints and declared command profiles. The current coordination
+service is a narrower separate profile. External integration obligations and
+excluded profiles are not guarantees; see current v0.3 readiness and the
+historical v0.1/v0.2 ledgers.
 
 ## R1 — authoritative engine
 
@@ -154,3 +156,42 @@ incarnations and revision without carrying task content, raw idempotency materia
 grant, or lease authority. Chronos does not claim cross-engine idempotency: the
 workflow/delivery layer must durably retain canonical intent-to-receipt mappings
 and distinguish matching replay from conflict before acknowledging an effect.
+
+## R16 — opt-in eligibility and fixed concurrency
+
+The selected native profile supports revision-guarded global/per-task scheduling
+pause and explicit not-before eligibility without interrupting existing leases.
+Fixed positive concurrency capacity is host-configured and funds exact attempt
+reservations. All claim paths enforce both eligibility and capacity; refusal
+cannot consume an attempt identity or grant claim. Unknown execution, expiry,
+cancellation, effect completion, retirement and restart cannot silently free a
+reservation. Release requires current host authority and independently established
+quiescence for the exact reserved attempt. Effect knowledge remains separate.
+State, copied identities, pages, checkpoint decoding and observations remain
+bounded. No retrospective migration may infer that historical executions stopped.
+Calendar recurrence, fairness, preemption and physical resource isolation are
+separate profiles, not consequences of these controls.
+
+## R17 — text continuity and independent work handoff
+
+User-facing work must retain meaningful, ordinary text context that humans and
+agents can read and edit with independent tools when Chronos, its UI or document
+integration is unavailable. IDs, binary checkpoints and app-only links are not
+sufficient handoff context. The composition layer provides descriptions, intended
+outcomes, relevant dependencies, notes and resolvable context alongside explicit
+last-observed coordination status; the pure scheduler remains content-minimized.
+
+Text formats and import/export belong to document/integration adapters. Existing
+source text, comments, unknown properties, mixed content and unrelated formatting
+must survive supported changes losslessly; unsupported structure is preserved or
+explicitly refused rather than silently normalized or dropped. No Emacs, Chronos
+daemon, plugin or embedded-code evaluation is required to understand the work.
+
+Portable work identity is distinct from service-scoped task incarnation and
+attempt references. Offline edits and checkmarks express authored intent/progress,
+not live leases, proven external effects or authority to release reservations.
+Reconnection explicitly reconciles exact identities, revisions and conflicts;
+it cannot replay stale status as execution authority or automatically resurrect
+retired work. Running/uncertain work remains visibly unresolved until qualified
+evidence establishes a safe continuation. Freshness and export failures must
+be visible; a stale handoff cannot masquerade as current coordination state.

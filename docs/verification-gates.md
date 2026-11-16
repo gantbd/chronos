@@ -3,6 +3,26 @@
 Gates are additive evidence with distinct scopes. A missing tool or component is
 reported as unavailable/open, never counted as a pass.
 
+## Current v0.3 workspace scope
+
+Use [current source-profile readiness](release-readiness-v0.3.md) for the release
+units and current commands. `make check` covers fourteen non-UI packages;
+`make check-profile` enforces native package/version/dependency/publication
+baselines; `make check-local-profile` additionally verifies the engine archive,
+installed WASI targets, named mutation smoke, optimized local runtime and approved
+reference-host performance/capacity gates. Neither requires sibling UIs
+or silently credits unavailable external tools. `check-release` remains the broad
+aggregate, not release authorization. The inventory below preserves the
+individual engine/adapter evidence; old v0.1/v0.2 dates remain historical.
+
+`make check-worker-profile` extends that selected recipe with optimized native
+worker/atomic lifecycle and receipt tests, abrupt synthetic worker process-loss
+recovery in both qualified stores, passive/saturated telemetry checks and the
+runnable SDK example. The full aggregate passed on 2026-11-10 (Rust 1.95.0,
+Darwin arm64). This establishes the trusted in-process interpreter, not a remote
+worker protocol, provider receipt verifier, machine-power-loss guarantee or
+independent formal certification. The local-source recipe itself is unchanged.
+
 | Gate | Command or artifact | Present status | Establishes | Does not establish |
 | --- | --- | --- | --- | --- |
 | Core | `make check` | Active | Format, lint, unit/BDD/reference/checkpoint-codec scenarios, docs compile | Durable-store, connector, platform, or concurrency-runtime truth |
@@ -38,7 +58,7 @@ reported as unavailable/open, never counted as a pass.
 | Performance | `make performance CHRONOS_PERF_BUDGET_MS=100` | Active host-scoped smoke evidence | Optimized 512-task admission/claim/checkpoint/recovery stages met the explicit budget on the recorded host/run | Product SLO, tail distribution, allocations, connectors, or other hosts/workloads |
 | Advisories | `make audit` | Tool-dependent | Pinned advisory database result at run time | Future vulnerabilities |
 | Dependency policy | `make dependencies` | Tool-dependent | Configured license/source/dependency rules | Runtime behavior or legal advice |
-| Built-in dependency baseline | `make dependency-baseline` | Active | Lockfile/runtime graph contain one package and zero third-party dependencies; declared SPDX expression is unchanged | Advisory intelligence, legal advice, provenance, or future dependency acceptability |
+| Built-in dependency baseline | `make dependency-baseline` | Active | Engine normal dependency closure contains one package and zero third-party dependencies; declared SPDX expression is unchanged | Whole-workspace dependency closure, advisory intelligence, legal advice, provenance, or future dependency acceptability |
 
 ## Mutation policy
 

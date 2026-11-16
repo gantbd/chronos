@@ -1,24 +1,42 @@
-[package]
-name = "chronos-engine"
-version = "0.2.0"
+[workspace]
+members = [
+    "engine/chronos-engine",
+    "host/chronos-host",
+    "host/chronos-model",
+    "protocol/chronos-protocol",
+    "protocol/chronos-wire",
+    "client/chronos-client",
+    "service/chronos-service",
+    "transport/chronos-local",
+    "adapters/checkpoint",
+    "adapters/native",
+    "connectors/chronos-mcp",
+    "applications/chronos-daemon",
+    "sdk/embedded",
+    "sdk/client",
+]
+resolver = "3"
+exclude = ["fuzz", "third_party/keystone-storage-0.0.1", "integration/vellum-capture"]
+
+[workspace.package]
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
-description = "A UI-agnostic task scheduling engine for coordinating autonomous agents"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/gantbd/chronos"
-homepage = "https://github.com/gantbd/chronos"
-documentation = "https://docs.rs/chronos-engine"
-readme = "README.md"
-keywords = ["scheduler", "agents", "workflow", "leases", "recovery"]
-categories = ["asynchronous", "data-structures"]
+publish = false
 
-[lib]
-path = "src/lib.rs"
+[workspace.dependencies]
+keystone-storage = { path = "third_party/keystone-storage-0.0.1", version = "=0.0.1" }
+chronos-engine = { path = "engine/chronos-engine", version = "=0.3.0" }
+chronos-host = { path = "host/chronos-host", version = "=0.1.0" }
+chronos-model = { path = "host/chronos-model", version = "=0.1.0" }
+chronos-protocol = { path = "protocol/chronos-protocol", version = "=0.1.0" }
+chronos-wire = { path = "protocol/chronos-wire", version = "=0.1.0" }
+chronos-client = { path = "client/chronos-client", version = "=0.1.0" }
+chronos-service = { path = "service/chronos-service", version = "=0.1.0" }
+chronos-local = { path = "transport/chronos-local", version = "=0.1.0" }
+chronos-adapter-checkpoint = { path = "adapters/checkpoint", version = "=0.1.0" }
+chronos-adapter-native = { path = "adapters/native", version = "=0.1.0" }
 
-[dependencies]
-
-[lints.rust]
+[workspace.lints.rust]
 unsafe_code = "forbid"
-
-[lints.clippy]
-all = "warn"

@@ -1,0 +1,7 @@
+{
+  "git": {
+    "sha1": "8cdebfb3280037453e357d849b80c82ad0c4ef8d",
+    "dirty": true
+  },
+  "path_in_vcs": "crates/keystone-storage"
+}
