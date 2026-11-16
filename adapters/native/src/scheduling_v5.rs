@@ -12,7 +12,7 @@ use chronos_host::scheduling::{
 use chronos_wire::{CodecError, Limits, scheduling_v5 as wire};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-fn timestamp(value: wire::Timestamp) -> Result<SystemTime, CodecError> {
+pub(crate) fn timestamp(value: wire::Timestamp) -> Result<SystemTime, CodecError> {
     value.validate()?;
     let duration = Duration::new(super::decimal(&value.seconds)?, value.nanos);
     if value.before_epoch {

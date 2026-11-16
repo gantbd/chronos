@@ -69,6 +69,10 @@ from current task-name snapshots.
 The opt-in V5 scheduling client exposes guarded pause, eligibility/not-before and
 fixed concurrency controls on the atomic local service. Ordinary write rights
 cannot attest executor quiescence; that remains a separate trusted native duty.
+The V7 scheduled-admission profile publishes a bounded graph and each task's
+exact-incarnation eligibility as one retained atomic invocation. Its scoped
+lookup reconciles a lost reply without admitting missing work; V4 supplies the
+original allocation when receipt capture is enabled.
 The initial local profile is not per-agent or remote credential authentication.
 Standalone startup durably initializes only with first-created writer-lock
 provenance; missing state under an existing lock refuses instead of resetting.

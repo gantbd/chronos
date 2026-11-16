@@ -31,6 +31,7 @@ pub fn decode_response_v2(
 
 /// Strict version dispatch without falling back from a malformed profile.
 pub enum ProfileRequest {
+    ScheduledAdmissionV7(coordination_v7::Request),
     DependenciesV6(dependencies_v6::Request),
     SchedulingV5(scheduling_v5::Request),
     V4(coordination_v4::Request),
@@ -41,6 +42,7 @@ pub enum ProfileRequest {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ProfileResponse {
+    ScheduledAdmissionV7(coordination_v7::Response),
     DependenciesV6(dependencies_v6::Response),
     SchedulingV5(scheduling_v5::Response),
     V4(coordination_v4::Response),
@@ -50,6 +52,7 @@ pub enum ProfileResponse {
 }
 pub fn decode_profile(bytes: &[u8], limits: Limits) -> Result<ProfileRequest, CodecError> {
     match request_version(bytes, limits.max_frame_bytes)? {
+        7 => decode_request_v7(bytes, limits).map(ProfileRequest::ScheduledAdmissionV7),
         6 => {
             let request: dependencies_v6::Request =
                 serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
@@ -70,6 +73,19 @@ pub fn decode_profile(bytes: &[u8], limits: Limits) -> Result<ProfileRequest, Co
 /// its command is invalid. Unknown/ambiguous envelopes retain the legacy V1
 /// generic refusal. No input content is reflected in the response.
 pub fn profile_refusal(bytes: &[u8], limits: Limits, error: CodecError) -> ProfileResponse {
+    if request_version(bytes, limits.max_frame_bytes) == Ok(7) {
+        return ProfileResponse::ScheduledAdmissionV7(coordination_v7::Response {
+            version: 7,
+            outcome: coordination_v7::Outcome::Refused {
+                code: match error {
+                    CodecError::Limit => coordination_v7::RefusalCode::Limit,
+                    CodecError::Capacity => coordination_v7::RefusalCode::Capacity,
+                    CodecError::Version => coordination_v7::RefusalCode::UnsupportedVersion,
+                    CodecError::Malformed => coordination_v7::RefusalCode::InvalidRequest,
+                },
+            },
+        });
+    }
     if request_version(bytes, limits.max_frame_bytes) == Ok(6) {
         return ProfileResponse::DependenciesV6(dependencies_v6::Response {
             version: 6,
@@ -155,6 +171,32 @@ pub fn decode_request_v3(
         serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
     request.validate(limits)?;
     Ok(request)
+}
+
+pub fn decode_request_v7(
+    bytes: &[u8],
+    limits: Limits,
+) -> Result<coordination_v7::Request, CodecError> {
+    if bytes.len() > limits.max_frame_bytes {
+        return Err(CodecError::Limit);
+    }
+    let request: coordination_v7::Request =
+        serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
+    request.validate(limits)?;
+    Ok(request)
+}
+
+pub fn decode_response_v7(
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<coordination_v7::Response, CodecError> {
+    if bytes.len() > max_bytes {
+        return Err(CodecError::Limit);
+    }
+    let response: coordination_v7::Response =
+        serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
+    response.validate()?;
+    Ok(response)
 }
 pub fn decode_response_v3(
     bytes: &[u8],

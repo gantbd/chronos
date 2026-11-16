@@ -333,6 +333,9 @@ impl Server {
         };
         self.verify_ownership()?;
         let response = match chronos_wire::decode_profile(&frame, chronos_local::wire_limits()) {
+            Ok(chronos_wire::ProfileRequest::ScheduledAdmissionV7(request)) => {
+                chronos_wire::ProfileResponse::ScheduledAdmissionV7(self.service.v7(request)?)
+            }
             Ok(chronos_wire::ProfileRequest::V1(request)) => {
                 chronos_wire::ProfileResponse::V1(chronos_adapter_native::response(
                     self.service

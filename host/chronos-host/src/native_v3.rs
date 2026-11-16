@@ -109,6 +109,12 @@ pub enum InvocationRequestV1 {
         invocation: InvocationV1,
         command: MutationV1,
     },
+    /// Reconcile only when the retained command exactly matches. This never
+    /// admits a new invocation, even when the serial is the next available one.
+    LookupCommand {
+        invocation: InvocationV1,
+        command: MutationV1,
+    },
     Lookup {
         invocation: InvocationV1,
     },
@@ -118,6 +124,7 @@ impl std::fmt::Debug for InvocationRequestV1 {
         f.write_str(match self {
             Self::Next => "InvocationRequestV1::Next",
             Self::Execute { .. } => "InvocationRequestV1::Execute",
+            Self::LookupCommand { .. } => "InvocationRequestV1::LookupCommand",
             Self::Lookup { .. } => "InvocationRequestV1::Lookup",
         })
     }

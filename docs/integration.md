@@ -222,6 +222,31 @@ journeys and a real terminal snapshot qualify the path; new macOS controls were
 not opened or visually desktop-qualified. Not-before form entry is explicitly
 whole Unix seconds (or clear), preserving existing precision during pause changes.
 
+### Atomic scheduled admission V7 (opt-in)
+
+`protocol::coordination_v7` and `client::ScheduledAdmissionWireClientV7` expose
+one owner-side transition that admits a bounded coordination graph and binds
+pause/not-before eligibility to every newly allocated exact incarnation before
+any task can be claimed. The scheduling profile must already be enabled. A
+refusal publishes neither graph nor eligibility; successful publication and the
+retained invocation share one durable service-envelope commit.
+
+Execute carries a caller-selected serial/key, expected revision and the complete
+scheduled graph. `LookupScheduledGraph` carries that same complete command and
+is reconciliation-only: it returns a retained result only on an exact canonical
+match and never admits the next missing serial. This is the safe path after an
+unknown transport outcome. It is not an automatic retry, and serial/key alone
+remain correlation rather than authority. Read-only restart permits scoped
+lookup but refuses execute. V3 stays closed and unchanged.
+
+When exact allocated references are required, enable
+`--atomic-state --allocation-receipts` before admission and query V4 with the
+same serial/key after V7 reports `Applied`. The same `LocalClient` implements V7,
+V4 and V5 for standalone callers and Workbench integrations; composition does
+not gain a second privileged path. The private-process gate covers discarded
+reply, scoped reconciliation, exact allocation, preserved eligibility and
+read-only restart.
+
 ### Native original-allocation facet (opt-in)
 
 `chronos_host::native_allocation::AllocationClientV1` exposes a typed retained

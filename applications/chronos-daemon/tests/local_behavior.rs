@@ -157,6 +157,159 @@ fn atomic_wire_lost_reply_lookup_replay_and_read_only_restart_use_one_committed_
 }
 
 #[test]
+fn scheduled_v7_lost_reply_reconciles_without_partial_claimability_or_reexecution() {
+    use chronos_client::{ScheduledAdmissionWireClientV7, SchedulingWireClientV5, WireClientV4};
+    use chronos_wire::{coordination_v4 as v4, coordination_v7 as v7, scheduling_v5 as v5};
+    use std::io::Write;
+
+    let directory = Directory::new();
+    let server = Running::start_flags(
+        &directory.0,
+        &["--atomic-state", "--allocation-receipts", "--allow-writes"],
+    );
+    let mut client = LocalClient::new(&directory.0);
+    assert!(matches!(
+        client
+            .request_scheduling_v5(v5::Request {
+                version: 5,
+                command: v5::Command::Enable {
+                    expected: Revision::Finite("0".into()),
+                },
+            })
+            .unwrap()
+            .outcome,
+        v5::Outcome::Control {
+            result: v5::ControlResult::Applied {}
+        }
+    ));
+
+    let scheduled = || v7::Request {
+        version: 7,
+        command: v7::Command::ExecuteScheduledGraph {
+            invocation: v7::Invocation {
+                serial: "1".into(),
+                key: "scheduled-private-intent".into(),
+            },
+            expected: Revision::Finite("1".into()),
+            tasks: vec![v7::ScheduledTask {
+                task: TaskSpec {
+                    id: "scheduled".into(),
+                    priority: 0,
+                    dependencies: vec![],
+                    capabilities: vec![],
+                    max_attempts: 1,
+                    retry_safety: RetrySafety::FenceUnknown,
+                },
+                eligibility: v5::Eligibility {
+                    paused: true,
+                    not_before: Some(v5::Timestamp {
+                        before_epoch: false,
+                        seconds: "42".into(),
+                        nanos: 7,
+                    }),
+                },
+            }],
+        },
+    };
+    let lookup = || {
+        let request = scheduled();
+        let v7::Command::ExecuteScheduledGraph {
+            invocation,
+            expected,
+            tasks,
+        } = request.command
+        else {
+            unreachable!()
+        };
+        v7::Request {
+            version: 7,
+            command: v7::Command::LookupScheduledGraph {
+                invocation,
+                expected,
+                tasks,
+            },
+        }
+    };
+
+    let mut lost =
+        std::os::unix::net::UnixStream::connect(chronos_local::socket_path(&directory.0)).unwrap();
+    lost.shutdown(std::net::Shutdown::Read).unwrap();
+    lost.write_all(&chronos_wire::encode(&scheduled(), chronos_local::MAX_REQUEST_BYTES).unwrap())
+        .unwrap();
+    lost.write_all(b"\n").unwrap();
+    lost.shutdown(std::net::Shutdown::Write).unwrap();
+    assert!(matches!(
+        client
+            .request_scheduled_admission_v7(lookup())
+            .unwrap()
+            .outcome,
+        v7::Outcome::InvocationResult {
+            result: v7::MutationResult::Applied {},
+            ..
+        }
+    ));
+
+    let allocation = client
+        .request_v4(v4::Request {
+            version: 4,
+            command: v4::Command::LookupAllocation {
+                serial: "1".into(),
+                key: "scheduled-private-intent".into(),
+            },
+        })
+        .unwrap();
+    let v4::Outcome::Allocation { tasks, .. } = allocation.outcome else {
+        panic!("exact scheduled allocation expected")
+    };
+    assert_eq!(tasks.len(), 1);
+    assert!(matches!(
+        client
+            .request_scheduling_v5(v5::Request {
+                version: 5,
+                command: v5::Command::Eligibility {
+                    task: tasks[0].clone(),
+                },
+            })
+            .unwrap()
+            .outcome,
+        v5::Outcome::Eligibility {
+            eligibility: Some(v5::Eligibility {
+                paused: true,
+                not_before: Some(v5::Timestamp {
+                    before_epoch: false,
+                    seconds,
+                    nanos: 7,
+                }),
+            }),
+            ..
+        } if seconds == "42"
+    ));
+
+    drop(lost);
+    drop(server);
+    let _readonly = Running::start(&directory.0, false);
+    assert!(matches!(
+        client
+            .request_scheduled_admission_v7(lookup())
+            .unwrap()
+            .outcome,
+        v7::Outcome::InvocationResult {
+            result: v7::MutationResult::Applied {},
+            ..
+        }
+    ));
+    assert!(matches!(
+        client
+            .request_scheduled_admission_v7(scheduled())
+            .unwrap()
+            .outcome,
+        v7::Outcome::Refused {
+            code: v7::RefusalCode::Unauthorized
+        }
+    ));
+}
+
+#[test]
 fn exact_cancellation_receipt_recovers_lost_reply_without_another_effect() {
     use chronos_client::WireClientV3;
     use chronos_wire::{Phase, coordination_v3 as v3};

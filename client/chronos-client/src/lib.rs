@@ -2,6 +2,14 @@
 #![forbid(unsafe_code)]
 pub mod observer;
 pub mod workbench;
+/// Atomic graph-plus-eligibility admission with command-scoped reconciliation.
+pub trait ScheduledAdmissionWireClientV7 {
+    type Error;
+    fn request_scheduled_admission_v7(
+        &mut self,
+        request: chronos_protocol::coordination_v7::Request,
+    ) -> Result<chronos_protocol::coordination_v7::Response, Self::Error>;
+}
 /// Explicit opt-in. Execution-stop attestations are deliberately absent.
 pub trait SchedulingWireClientV5 {
     type Error;

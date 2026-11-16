@@ -694,6 +694,15 @@ fn lost_reply_lookup_and_identical_replay_survive_restart_without_a_second_commi
     });
     assert_eq!(service.invoke(execute(1, submit())).unwrap(), expected);
     let committed = store.state.lock().unwrap().clone();
+    assert_eq!(
+        service
+            .invoke(InvocationRequestV1::LookupCommand {
+                invocation: id(1),
+                command: submit(),
+            })
+            .unwrap(),
+        expected
+    );
     assert_eq!(service.invoke(execute(1, submit())).unwrap(), expected);
     assert_eq!(*store.state.lock().unwrap(), committed);
     assert_eq!(
@@ -742,6 +751,26 @@ fn lost_reply_lookup_and_identical_replay_survive_restart_without_a_second_commi
         reopened.invoke(InvocationRequestV1::Next).unwrap(),
         Ok(InvocationResponseV1::Next { serial: Some(2) })
     );
+}
+
+#[test]
+fn command_scoped_lookup_never_admits_a_missing_invocation() {
+    let mut service = service(Store::default());
+    assert_eq!(
+        service
+            .invoke(InvocationRequestV1::LookupCommand {
+                invocation: id(1),
+                command: submit(),
+            })
+            .unwrap(),
+        Err(InvocationRefusalV1::OutOfSequence)
+    );
+    assert!(matches!(
+        service
+            .dispatch(RequestV1::Snapshot { task: "a".into() })
+            .unwrap(),
+        Ok(ResponseV1::Snapshot(None))
+    ));
 }
 
 #[test]

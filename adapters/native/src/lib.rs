@@ -3,6 +3,7 @@
 pub mod coordination_v2;
 pub mod coordination_v3;
 pub mod coordination_v4;
+pub mod coordination_v7;
 pub mod scheduling_v5;
 #[derive(Debug)]
 pub enum EmbeddedError<E> {
@@ -245,49 +246,50 @@ impl NativeRequest for Request {
                 expected: expected.native()?,
                 task: task.native(limits)?,
             },
-            Command::SubmitGraph { expected, tasks } => {
-                if tasks.len() > limits.max_graph_tasks {
-                    return Err(CodecError::Limit);
-                }
-                let mut native = Vec::new();
-                native
-                    .try_reserve_exact(tasks.len())
-                    .map_err(|_| CodecError::Capacity)?;
-                for task in tasks {
-                    check_name(&task.id, limits.max_id_bytes)?;
-                    if task.dependencies.len() > limits.max_dependencies_per_task
-                        || task.capabilities.len() > limits.max_capabilities_per_task
-                    {
-                        return Err(CodecError::Limit);
-                    }
-                    let mut value = TaskSpecV2::new(TaskId::new(task.id))
-                        .with_priority(task.priority)
-                        .with_max_attempts(task.max_attempts);
-                    for dependency in task.dependencies {
-                        check_name(&dependency, limits.max_id_bytes)?;
-                        if !value.dependencies.insert(TaskId::new(dependency)) {
-                            return Err(CodecError::Malformed);
-                        }
-                    }
-                    for capability in task.capabilities {
-                        check_name(&capability, limits.max_capability_bytes)?;
-                        if !value.required_capabilities.insert(capability) {
-                            return Err(CodecError::Malformed);
-                        }
-                    }
-                    value.retry_safety = match task.retry_safety {
-                        RetrySafety::FenceUnknown => RetrySafetyV1::FenceUnknown,
-                        RetrySafety::ConnectorIdempotent => RetrySafetyV1::ConnectorIdempotent,
-                    };
-                    native.push(value);
-                }
-                RequestV1::SubmitGraph {
-                    expected: expected.native()?,
-                    tasks: native,
-                }
-            }
+            Command::SubmitGraph { expected, tasks } => RequestV1::SubmitGraph {
+                expected: expected.native()?,
+                tasks: native_tasks(tasks, limits)?,
+            },
         })
     }
+}
+fn native_tasks(tasks: Vec<TaskSpec>, limits: Limits) -> Result<Vec<TaskSpecV2>, CodecError> {
+    if tasks.len() > limits.max_graph_tasks {
+        return Err(CodecError::Limit);
+    }
+    let mut native = Vec::new();
+    native
+        .try_reserve_exact(tasks.len())
+        .map_err(|_| CodecError::Capacity)?;
+    for task in tasks {
+        check_name(&task.id, limits.max_id_bytes)?;
+        if task.dependencies.len() > limits.max_dependencies_per_task
+            || task.capabilities.len() > limits.max_capabilities_per_task
+        {
+            return Err(CodecError::Limit);
+        }
+        let mut value = TaskSpecV2::new(TaskId::new(task.id))
+            .with_priority(task.priority)
+            .with_max_attempts(task.max_attempts);
+        for dependency in task.dependencies {
+            check_name(&dependency, limits.max_id_bytes)?;
+            if !value.dependencies.insert(TaskId::new(dependency)) {
+                return Err(CodecError::Malformed);
+            }
+        }
+        for capability in task.capabilities {
+            check_name(&capability, limits.max_capability_bytes)?;
+            if !value.required_capabilities.insert(capability) {
+                return Err(CodecError::Malformed);
+            }
+        }
+        value.retry_safety = match task.retry_safety {
+            RetrySafety::FenceUnknown => RetrySafetyV1::FenceUnknown,
+            RetrySafety::ConnectorIdempotent => RetrySafetyV1::ConnectorIdempotent,
+        };
+        native.push(value);
+    }
+    Ok(native)
 }
 fn decimal(value: &str) -> Result<u64, CodecError> {
     if value.is_empty()

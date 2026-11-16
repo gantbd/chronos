@@ -29,7 +29,7 @@ pub struct Eligibility {
     pub not_before: Option<Timestamp>,
 }
 impl Eligibility {
-    fn validate(&self) -> Result<(), CodecError> {
+    pub(crate) fn validate(&self) -> Result<(), CodecError> {
         self.not_before.as_ref().map_or(Ok(()), Timestamp::validate)
     }
 }

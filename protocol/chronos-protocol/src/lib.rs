@@ -8,6 +8,7 @@ pub mod control;
 pub mod coordination_v2;
 pub mod coordination_v3;
 pub mod coordination_v4;
+pub mod coordination_v7;
 pub mod dependencies_v6;
 pub mod scheduling_v5;
 
@@ -68,14 +69,14 @@ pub struct Cursor {
     pub after: Reference,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetrySafety {
     FenceUnknown,
     ConnectorIdempotent,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskSpec {
     pub id: String,
@@ -153,6 +154,28 @@ impl Request {
     }
 }
 
+fn validate_task(task: &TaskSpec, limits: Limits) -> Result<(), CodecError> {
+    check_name(&task.id, limits.max_id_bytes)?;
+    if task.dependencies.len() > limits.max_dependencies_per_task
+        || task.capabilities.len() > limits.max_capabilities_per_task
+    {
+        return Err(CodecError::Limit);
+    }
+    for (values, ceiling) in [
+        (&task.dependencies, limits.max_id_bytes),
+        (&task.capabilities, limits.max_capability_bytes),
+    ] {
+        let mut seen = std::collections::BTreeSet::new();
+        for value in values {
+            check_name(value, ceiling)?;
+            if !seen.insert(value) {
+                return Err(CodecError::Malformed);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn validate_graph(
     expected: &Revision,
     tasks: &[TaskSpec],
@@ -163,24 +186,7 @@ fn validate_graph(
         return Err(CodecError::Limit);
     }
     for task in tasks {
-        check_name(&task.id, limits.max_id_bytes)?;
-        if task.dependencies.len() > limits.max_dependencies_per_task
-            || task.capabilities.len() > limits.max_capabilities_per_task
-        {
-            return Err(CodecError::Limit);
-        }
-        for (values, ceiling) in [
-            (&task.dependencies, limits.max_id_bytes),
-            (&task.capabilities, limits.max_capability_bytes),
-        ] {
-            let mut seen = std::collections::BTreeSet::new();
-            for value in values {
-                check_name(value, ceiling)?;
-                if !seen.insert(value) {
-                    return Err(CodecError::Malformed);
-                }
-            }
-        }
+        validate_task(task, limits)?;
     }
     Ok(())
 }

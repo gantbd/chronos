@@ -535,7 +535,7 @@ impl<A: InvocationAuthorizer, S: ServiceEnvelopeStore> AtomicService<A, S> {
         let index = match &request {
             InvocationRequestV1::Next => 0,
             InvocationRequestV1::Execute { .. } => 1,
-            InvocationRequestV1::Lookup { .. } => 2,
+            InvocationRequestV1::Lookup { .. } | InvocationRequestV1::LookupCommand { .. } => 2,
         };
         crate::increment(
             &mut self.signals.by_operation[index],
@@ -569,7 +569,7 @@ impl<A: InvocationAuthorizer, S: ServiceEnvelopeStore> AtomicService<A, S> {
         if !inner.authorizer.allows_invocation(&request) {
             return Ok(Err(InvocationRefusalV1::Unauthorized));
         }
-        let (invocation, command) = match request {
+        let (invocation, command, may_admit) = match request {
             InvocationRequestV1::Next => {
                 return Ok(Ok(InvocationResponseV1::Next {
                     serial: self.high_water.checked_add(1),
@@ -577,12 +577,19 @@ impl<A: InvocationAuthorizer, S: ServiceEnvelopeStore> AtomicService<A, S> {
             }
             InvocationRequestV1::Lookup { invocation } => {
                 crate::increment(&mut self.signals.lookups, &mut self.signals.saturated);
-                (invocation, None)
+                (invocation, None, false)
+            }
+            InvocationRequestV1::LookupCommand {
+                invocation,
+                command,
+            } => {
+                crate::increment(&mut self.signals.lookups, &mut self.signals.saturated);
+                (invocation, Some(command), false)
             }
             InvocationRequestV1::Execute {
                 invocation,
                 command,
-            } => (invocation, Some(command)),
+            } => (invocation, Some(command), true),
         };
         if invocation.serial == 0 || invocation.key.is_empty() {
             return Ok(Err(InvocationRefusalV1::Invalid));
@@ -617,7 +624,10 @@ impl<A: InvocationAuthorizer, S: ServiceEnvelopeStore> AtomicService<A, S> {
             }
             return self.release(&invocation);
         }
-        if self.high_water.checked_add(1) != Some(invocation.serial) || command.is_none() {
+        if !may_admit
+            || self.high_water.checked_add(1) != Some(invocation.serial)
+            || command.is_none()
+        {
             return Ok(Err(InvocationRefusalV1::OutOfSequence));
         }
         if self.revision == u64::MAX {
