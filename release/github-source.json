@@ -2,7 +2,9 @@
   "schema": 1,
   "channel": "github-coordinated-source",
   "chronosRepository": "https://github.com/gantbd/chronos",
-  "remoteReachabilityQualified": false,
+  "remoteReachabilityQualified": true,
+  "qualificationRevision": "ebff27188388cd0249d07751b1cc848c6ef1a3f9",
+  "qualificationRun": "https://github.com/gantbd/chronos/actions/runs/43971994950",
   "scope": "non-gui-core-workspace",
   "excludedProfiles": {
     "presentations": "separate repositories and gates",

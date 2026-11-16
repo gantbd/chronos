@@ -9,7 +9,8 @@ done
 rg -q '^channel = "1\.95\.0"$' rust-toolchain.toml || { echo 'Chronos toolchain is not pinned' >&2; exit 1; }
 rg -q '"channel": "github-coordinated-source"' release/github-source.json || { echo 'Chronos GitHub source channel missing' >&2; exit 1; }
 rg -q '"scope": "non-gui-core-workspace"' release/github-source.json || { echo 'Chronos publication scope drifted' >&2; exit 1; }
-rg -q '"remoteReachabilityQualified": false' release/github-source.json || { echo 'Chronos source profile claims unverified reachability' >&2; exit 1; }
+rg -q '"remoteReachabilityQualified": true' release/github-source.json || { echo 'Chronos source reachability is not qualified' >&2; exit 1; }
+rg -q '"qualificationRevision": "ebff27188388cd0249d07751b1cc848c6ef1a3f9"' release/github-source.json || { echo 'Chronos source qualification revision drifted' >&2; exit 1; }
 rg -q 'blocked on sibling Vellum dependency remediation' release/github-source.json || { echo 'Chronos excluded Vellum profile is not explicit' >&2; exit 1; }
 
 expected=$(awk -F': ' '$1 == "lockfile-sha256" { print $2 }' docs/advisory-attestation.md)
