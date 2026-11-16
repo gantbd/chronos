@@ -15,8 +15,9 @@ mod persistence;
 mod scheduling_controls;
 pub mod simulation;
 pub use scheduling_controls::{
-    ConcurrencyUsageV1, PreparedSchedulingTransitionV1, SchedulingCommandV1,
-    SchedulingControlErrorV1, SchedulingControlsV1, SchedulingEligibilityV1,
+    ConcurrencyUsageV1, PreparedSchedulingTransitionV1, ScheduledAdmissionErrorV1,
+    ScheduledTaskSpecV1, SchedulingCommandV1, SchedulingControlErrorV1, SchedulingControlsV1,
+    SchedulingEligibilityV1,
 };
 
 pub use algebra::{

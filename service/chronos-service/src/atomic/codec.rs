@@ -1,9 +1,15 @@
 //! Canonical bounded service envelopes V1/V2; engine checkpoint bytes unchanged.
 use super::{AtomicLimits, EnvelopeError, Retained};
-use chronos_engine::{RecoveryLimits, RetrySafetyV1, StateRevision, TaskId, TaskRefV1, TaskSpecV2};
+use chronos_engine::{
+    RecoveryLimits, RetrySafetyV1, ScheduledTaskSpecV1, SchedulingEligibilityV1, StateRevision,
+    TaskId, TaskRefV1, TaskSpecV2,
+};
 use chronos_host::native_allocation::AllocationReceiptV1;
 use chronos_host::native_v3::*;
-use std::collections::VecDeque;
+use std::{
+    collections::VecDeque,
+    time::{Duration, SystemTime},
+};
 const MAGIC: &[u8; 8] = b"CHRSVC\0\0";
 pub(super) struct Decoded {
     pub version: u16,
@@ -43,6 +49,13 @@ pub(super) fn entry_cost(
                 .checked_add(12)?
                 .checked_add(task.id.as_str().len())?;
         }
+    } else if let MutationV1::SubmitScheduledGraph { tasks, .. } = command {
+        result = result.checked_add(13)?;
+        for task in tasks {
+            result = result
+                .checked_add(12)?
+                .checked_add(task.task.id.as_str().len())?;
+        }
     }
     Some(result)
 }
@@ -50,24 +63,25 @@ fn validate_allocation(entry: &Retained) -> Result<(), EnvelopeError> {
     let Some(receipt) = &entry.allocation else {
         return Ok(());
     };
-    let MutationV1::SubmitGraph { tasks, .. } = &entry.command else {
-        return Err(EnvelopeError::Malformed);
+    let ids: std::collections::BTreeSet<_> = match &entry.command {
+        MutationV1::SubmitGraph { tasks, .. } => tasks.iter().map(|task| &task.id).collect(),
+        MutationV1::SubmitScheduledGraph { tasks, .. } => {
+            tasks.iter().map(|task| &task.task.id).collect()
+        }
+        _ => return Err(EnvelopeError::Malformed),
     };
     if entry.outcome != MutationOutcomeV1::Applied
         || !matches!(receipt.revision, StateRevision::Finite(value) if value != u64::MAX)
-        || receipt.tasks.len() != tasks.len()
+        || receipt.tasks.len() != ids.len()
     {
         return Err(EnvelopeError::Malformed);
     }
-    let ids: std::collections::BTreeSet<_> = tasks.iter().map(|task| &task.id).collect();
-    if ids.len() != tasks.len()
-        || !ids.into_iter().zip(&receipt.tasks).all(|(id, reference)| {
-            id == reference.task_id() && reference.incarnation().get() != u64::MAX
-        })
-        || receipt
-            .tasks
-            .windows(2)
-            .any(|pair| pair[0].task_id() >= pair[1].task_id())
+    if !ids.into_iter().zip(&receipt.tasks).all(|(id, reference)| {
+        id == reference.task_id() && reference.incarnation().get() != u64::MAX
+    }) || receipt
+        .tasks
+        .windows(2)
+        .any(|pair| pair[0].task_id() >= pair[1].task_id())
     {
         return Err(EnvelopeError::Malformed);
     }
@@ -98,6 +112,9 @@ impl Writer {
         self.put(&[value])
     }
     fn u64(&mut self, value: u64) -> Result<(), EnvelopeError> {
+        self.put(&value.to_be_bytes())
+    }
+    fn u32(&mut self, value: u32) -> Result<(), EnvelopeError> {
         self.put(&value.to_be_bytes())
     }
     fn count(&mut self, value: usize) -> Result<(), EnvelopeError> {
@@ -242,6 +259,103 @@ impl<'a> Reader<'a> {
         }
     }
 }
+fn encode_task(writer: &mut Writer, task: &TaskSpecV2) -> Result<(), EnvelopeError> {
+    writer.blob(task.id.as_str().as_bytes())?;
+    writer.put(&task.priority.to_be_bytes())?;
+    writer.count(task.dependencies.len())?;
+    for dependency in &task.dependencies {
+        writer.blob(dependency.as_str().as_bytes())?;
+    }
+    writer.count(task.required_capabilities.len())?;
+    for capability in &task.required_capabilities {
+        writer.blob(capability.as_bytes())?;
+    }
+    writer.put(&task.max_attempts.to_be_bytes())?;
+    writer.byte(match task.retry_safety {
+        RetrySafetyV1::FenceUnknown => 0,
+        RetrySafetyV1::ConnectorIdempotent => 1,
+    })
+}
+
+fn decode_task(reader: &mut Reader<'_>, max: usize) -> Result<TaskSpecV2, EnvelopeError> {
+    let mut task = TaskSpecV2::new(TaskId::new(reader.string(max)?));
+    task.priority = i32::from_be_bytes(
+        reader
+            .take(4)?
+            .try_into()
+            .map_err(|_| EnvelopeError::Malformed)?,
+    );
+    for _ in 0..reader.count(4)? {
+        if !task.dependencies.insert(TaskId::new(reader.string(max)?)) {
+            return Err(EnvelopeError::Malformed);
+        }
+    }
+    for _ in 0..reader.count(4)? {
+        if !task.required_capabilities.insert(reader.string(max)?) {
+            return Err(EnvelopeError::Malformed);
+        }
+    }
+    task.max_attempts = reader.u32()?;
+    task.retry_safety = match reader.byte()? {
+        0 => RetrySafetyV1::FenceUnknown,
+        1 => RetrySafetyV1::ConnectorIdempotent,
+        _ => return Err(EnvelopeError::Malformed),
+    };
+    Ok(task)
+}
+
+fn encode_eligibility(
+    writer: &mut Writer,
+    eligibility: SchedulingEligibilityV1,
+) -> Result<(), EnvelopeError> {
+    writer.byte(u8::from(eligibility.paused))?;
+    let Some(time) = eligibility.not_before else {
+        return writer.byte(0);
+    };
+    writer.byte(1)?;
+    let (before_epoch, duration) = match time.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(duration) => (false, duration),
+        Err(error) => (true, error.duration()),
+    };
+    writer.byte(u8::from(before_epoch))?;
+    writer.u64(duration.as_secs())?;
+    writer.u32(duration.subsec_nanos())
+}
+
+fn decode_eligibility(reader: &mut Reader<'_>) -> Result<SchedulingEligibilityV1, EnvelopeError> {
+    let paused = match reader.byte()? {
+        0 => false,
+        1 => true,
+        _ => return Err(EnvelopeError::Malformed),
+    };
+    let not_before = match reader.byte()? {
+        0 => None,
+        1 => {
+            let before_epoch = match reader.byte()? {
+                0 => false,
+                1 => true,
+                _ => return Err(EnvelopeError::Malformed),
+            };
+            let seconds = reader.u64()?;
+            let nanoseconds = reader.u32()?;
+            if nanoseconds >= 1_000_000_000 {
+                return Err(EnvelopeError::Malformed);
+            }
+            let duration = Duration::new(seconds, nanoseconds);
+            Some(
+                if before_epoch {
+                    SystemTime::UNIX_EPOCH.checked_sub(duration)
+                } else {
+                    SystemTime::UNIX_EPOCH.checked_add(duration)
+                }
+                .ok_or(EnvelopeError::Malformed)?,
+            )
+        }
+        _ => return Err(EnvelopeError::Malformed),
+    };
+    Ok(SchedulingEligibilityV1 { paused, not_before })
+}
+
 pub(super) fn encode_command(command: &MutationV1, max: usize) -> Result<Vec<u8>, EnvelopeError> {
     let mut writer = Writer::new(max);
     match command {
@@ -250,21 +364,7 @@ pub(super) fn encode_command(command: &MutationV1, max: usize) -> Result<Vec<u8>
             writer.revision(*expected)?;
             writer.count(tasks.len())?;
             for task in tasks {
-                writer.blob(task.id.as_str().as_bytes())?;
-                writer.put(&task.priority.to_be_bytes())?;
-                writer.count(task.dependencies.len())?;
-                for dependency in &task.dependencies {
-                    writer.blob(dependency.as_str().as_bytes())?;
-                }
-                writer.count(task.required_capabilities.len())?;
-                for capability in &task.required_capabilities {
-                    writer.blob(capability.as_bytes())?;
-                }
-                writer.put(&task.max_attempts.to_be_bytes())?;
-                writer.byte(match task.retry_safety {
-                    RetrySafetyV1::FenceUnknown => 0,
-                    RetrySafetyV1::ConnectorIdempotent => 1,
-                })?;
+                encode_task(&mut writer, task)?;
             }
         }
         MutationV1::Cancel { expected, task } => {
@@ -276,6 +376,15 @@ pub(super) fn encode_command(command: &MutationV1, max: usize) -> Result<Vec<u8>
             writer.byte(2)?;
             writer.revision(*expected)?;
             writer.reference(task)?;
+        }
+        MutationV1::SubmitScheduledGraph { expected, tasks } => {
+            writer.byte(3)?;
+            writer.revision(*expected)?;
+            writer.count(tasks.len())?;
+            for task in tasks {
+                encode_task(&mut writer, &task.task)?;
+                encode_eligibility(&mut writer, task.eligibility)?;
+            }
         }
     }
     Ok(writer.bytes)
@@ -295,30 +404,7 @@ fn decode_command(bytes: &[u8], max: usize) -> Result<MutationV1, EnvelopeError>
                 .try_reserve_exact(count)
                 .map_err(|_| EnvelopeError::Capacity)?;
             for _ in 0..count {
-                let mut task = TaskSpecV2::new(TaskId::new(reader.string(max)?));
-                task.priority = i32::from_be_bytes(
-                    reader
-                        .take(4)?
-                        .try_into()
-                        .map_err(|_| EnvelopeError::Malformed)?,
-                );
-                for _ in 0..reader.count(4)? {
-                    if !task.dependencies.insert(TaskId::new(reader.string(max)?)) {
-                        return Err(EnvelopeError::Malformed);
-                    }
-                }
-                for _ in 0..reader.count(4)? {
-                    if !task.required_capabilities.insert(reader.string(max)?) {
-                        return Err(EnvelopeError::Malformed);
-                    }
-                }
-                task.max_attempts = reader.u32()?;
-                task.retry_safety = match reader.byte()? {
-                    0 => RetrySafetyV1::FenceUnknown,
-                    1 => RetrySafetyV1::ConnectorIdempotent,
-                    _ => return Err(EnvelopeError::Malformed),
-                };
-                tasks.push(task);
+                tasks.push(decode_task(&mut reader, max)?);
             }
             MutationV1::SubmitGraph { expected, tasks }
         }
@@ -330,6 +416,20 @@ fn decode_command(bytes: &[u8], max: usize) -> Result<MutationV1, EnvelopeError>
             expected,
             task: reader.reference(max)?,
         },
+        3 => {
+            let count = reader.count(23)?;
+            let mut tasks = Vec::new();
+            tasks
+                .try_reserve_exact(count)
+                .map_err(|_| EnvelopeError::Capacity)?;
+            for _ in 0..count {
+                tasks.push(ScheduledTaskSpecV1 {
+                    task: decode_task(&mut reader, max)?,
+                    eligibility: decode_eligibility(&mut reader)?,
+                });
+            }
+            MutationV1::SubmitScheduledGraph { expected, tasks }
+        }
         _ => return Err(EnvelopeError::Malformed),
     };
     reader.finish()?;
@@ -449,8 +549,12 @@ pub(super) fn decode(
                 1 => {
                     let revision = reader.revision()?;
                     let count = reader.count(12)?;
-                    if !matches!(&command, MutationV1::SubmitGraph { tasks, .. } if tasks.len() == count)
-                    {
+                    let submitted_count = match &command {
+                        MutationV1::SubmitGraph { tasks, .. } => Some(tasks.len()),
+                        MutationV1::SubmitScheduledGraph { tasks, .. } => Some(tasks.len()),
+                        _ => None,
+                    };
+                    if submitted_count != Some(count) {
                         return Err(EnvelopeError::Malformed);
                     }
                     let mut tasks = Vec::new();
@@ -525,11 +629,37 @@ mod tests {
             .insert("private-capability".into());
         task.retry_safety = RetrySafetyV1::ConnectorIdempotent;
         let reference = TaskRefV1::from_observation("private-task".into(), u64::MAX);
+        let before_epoch = SystemTime::UNIX_EPOCH
+            .checked_sub(Duration::new(5, 11))
+            .unwrap();
+        let after_epoch = SystemTime::UNIX_EPOCH
+            .checked_add(Duration::new(8, 13))
+            .unwrap();
         for command in [
             empty,
             MutationV1::SubmitGraph {
                 expected: StateRevision::Exhausted,
-                tasks: vec![task],
+                tasks: vec![task.clone()],
+            },
+            MutationV1::SubmitScheduledGraph {
+                expected: StateRevision::Finite(21),
+                tasks: vec![ScheduledTaskSpecV1 {
+                    task: task.clone(),
+                    eligibility: SchedulingEligibilityV1 {
+                        paused: true,
+                        not_before: Some(before_epoch),
+                    },
+                }],
+            },
+            MutationV1::SubmitScheduledGraph {
+                expected: StateRevision::Finite(22),
+                tasks: vec![ScheduledTaskSpecV1 {
+                    task,
+                    eligibility: SchedulingEligibilityV1 {
+                        paused: false,
+                        not_before: Some(after_epoch),
+                    },
+                }],
             },
             MutationV1::Cancel {
                 expected: StateRevision::Finite(23),

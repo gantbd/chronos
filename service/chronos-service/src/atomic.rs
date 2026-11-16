@@ -150,6 +150,7 @@ impl<A: InvocationAuthorizer + crate::scheduling::SchedulingAuthorizerV1, S: Ser
         self.inner.as_ref().map(Service::scheduling_signals)
     }
 }
+
 impl<A: InvocationAuthorizer + crate::scheduling::SchedulingAuthorizerV1, S: ServiceEnvelopeStore>
     chronos_host::scheduling::SchedulingClientV1 for AtomicService<A, S>
 {
@@ -639,9 +640,13 @@ impl<A: InvocationAuthorizer, S: ServiceEnvelopeStore> AtomicService<A, S> {
             return Ok(Err(InvocationRefusalV1::Limit));
         }
         let mut original_tasks = Vec::new();
+        let submitted_count = match &command {
+            MutationV1::SubmitGraph { tasks, .. } => Some(tasks.len()),
+            MutationV1::SubmitScheduledGraph { tasks, .. } => Some(tasks.len()),
+            _ => None,
+        };
         if self.envelope_version == 2
-            && let MutationV1::SubmitGraph { tasks, .. } = &command
-            && original_tasks.try_reserve_exact(tasks.len()).is_err()
+            && submitted_count.is_some_and(|count| original_tasks.try_reserve_exact(count).is_err())
         {
             return Ok(Err(InvocationRefusalV1::Limit));
         }
@@ -650,9 +655,18 @@ impl<A: InvocationAuthorizer, S: ServiceEnvelopeStore> AtomicService<A, S> {
             Err(refusal) => return Ok(Err(refusal)),
         };
         let allocation = if self.envelope_version == 2 && outcome == MutationOutcomeV1::Applied {
-            if let MutationV1::SubmitGraph { tasks, .. } = &command {
-                for task in tasks {
-                    let Some(reference) = inner.engine.task_reference(&task.id) else {
+            let task_ids: Option<Vec<_>> = match &command {
+                MutationV1::SubmitGraph { tasks, .. } => {
+                    Some(tasks.iter().map(|task| &task.id).collect())
+                }
+                MutationV1::SubmitScheduledGraph { tasks, .. } => {
+                    Some(tasks.iter().map(|task| &task.task.id).collect())
+                }
+                _ => None,
+            };
+            if let Some(task_ids) = task_ids {
+                for task_id in task_ids {
+                    let Some(reference) = inner.engine.task_reference(task_id) else {
                         self.inner = None;
                         self.signals.fenced = true;
                         return Err(AtomicError::Codec(EnvelopeError::Malformed));
@@ -862,7 +876,9 @@ fn execute<A: InvocationAuthorizer>(
     command: MutationV1,
 ) -> Result<MutationOutcomeV1, InvocationRefusalV1> {
     use MutationCodeV1 as C;
-    use chronos_engine::{CancelError, ConditionalError, EngineError, RetirementError};
+    use chronos_engine::{
+        CancelError, ConditionalError, EngineError, RetirementError, ScheduledAdmissionErrorV1,
+    };
     let map = |refusal| match refusal {
         RefusalV1::Unauthorized => InvocationRefusalV1::Unauthorized,
         RefusalV1::Limit => InvocationRefusalV1::Limit,
@@ -880,6 +896,23 @@ fn execute<A: InvocationAuthorizer>(
             Err(ConditionalError::Domain(error)) => MutationOutcomeV1::Refused(code(error)),
         }
     }
+    fn graph_code(error: EngineError) -> MutationCodeV1 {
+        match error {
+            EngineError::InvalidTaskId => C::InvalidTaskId,
+            EngineError::DuplicateTask(_) => C::DuplicateTask,
+            EngineError::UnknownDependency { .. } => C::UnknownDependency,
+            EngineError::DependencyCycle(_) => C::DependencyCycle,
+            EngineError::TaskLimit => C::TaskLimit,
+            EngineError::DependencyEdgeLimit => C::DependencyEdgeLimit,
+            EngineError::CapabilityLimit => C::CapabilityLimit,
+            EngineError::InvalidCapabilityName => C::InvalidCapabilityName,
+            EngineError::SummaryLimit => C::SummaryLimit,
+            EngineError::InvalidAttemptLimit => C::InvalidAttemptLimit,
+            EngineError::InvalidInitialProgress => C::InvalidInitialProgress,
+            EngineError::InvalidIdempotencyKey => C::InvalidIdempotencyKey,
+            EngineError::TaskIdentityExhausted => C::TaskIdentityExhausted,
+        }
+    }
     Ok(match command {
         MutationV1::SubmitGraph { expected, tasks } => {
             let ResponseV1::SubmitGraph(result) = service
@@ -888,20 +921,16 @@ fn execute<A: InvocationAuthorizer>(
             else {
                 unreachable!("closed dispatch")
             };
+            outcome(result, graph_code)
+        }
+        MutationV1::SubmitScheduledGraph { expected, tasks } => {
+            let result = service
+                .engine
+                .submit_scheduled_coordination_graph_at_revision(expected, tasks)
+                .map(|_| ());
             outcome(result, |error| match error {
-                EngineError::InvalidTaskId => C::InvalidTaskId,
-                EngineError::DuplicateTask(_) => C::DuplicateTask,
-                EngineError::UnknownDependency { .. } => C::UnknownDependency,
-                EngineError::DependencyCycle(_) => C::DependencyCycle,
-                EngineError::TaskLimit => C::TaskLimit,
-                EngineError::DependencyEdgeLimit => C::DependencyEdgeLimit,
-                EngineError::CapabilityLimit => C::CapabilityLimit,
-                EngineError::InvalidCapabilityName => C::InvalidCapabilityName,
-                EngineError::SummaryLimit => C::SummaryLimit,
-                EngineError::InvalidAttemptLimit => C::InvalidAttemptLimit,
-                EngineError::InvalidInitialProgress => C::InvalidInitialProgress,
-                EngineError::InvalidIdempotencyKey => C::InvalidIdempotencyKey,
-                EngineError::TaskIdentityExhausted => C::TaskIdentityExhausted,
+                ScheduledAdmissionErrorV1::SchedulingNotEnabled => C::SchedulingNotEnabled,
+                ScheduledAdmissionErrorV1::Graph(error) => graph_code(error),
             })
         }
         MutationV1::Cancel { expected, task } => {

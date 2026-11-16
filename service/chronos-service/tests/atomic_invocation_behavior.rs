@@ -1,5 +1,6 @@
 use chronos_engine::{
-    AcknowledgementStrength, EngineLimits, RecoveryLimits, StateRevision, TaskSpecV2,
+    AcknowledgementStrength, EngineLimits, RecoveryLimits, ScheduledTaskSpecV1,
+    SchedulingEligibilityV1, StateRevision, TaskSpecV2,
 };
 use chronos_host::native::{RequestV1, ResponseV1};
 use chronos_host::native_v2::RequestV2;
@@ -664,6 +665,7 @@ fn service(store: Store) -> AtomicService<Policy, Store> {
     )
     .unwrap()
 }
+
 fn id(serial: u64) -> InvocationV1 {
     InvocationV1 {
         serial,
@@ -740,6 +742,136 @@ fn lost_reply_lookup_and_identical_replay_survive_restart_without_a_second_commi
         reopened.invoke(InvocationRequestV1::Next).unwrap(),
         Ok(InvocationResponseV1::Next { serial: Some(2) })
     );
+}
+
+#[test]
+fn scheduled_admission_is_atomic_retained_and_recovers_its_exact_allocation() {
+    use chronos_host::native_allocation::AllocationResultV1;
+    use chronos_host::scheduling::{SchedulingRequestV1 as Q, SchedulingResponseV1 as R};
+
+    let not_before = std::time::SystemTime::UNIX_EPOCH
+        .checked_add(std::time::Duration::new(42, 7))
+        .unwrap();
+    let command = MutationV1::SubmitScheduledGraph {
+        expected: StateRevision::finite(1),
+        tasks: vec![ScheduledTaskSpecV1 {
+            task: TaskSpecV2::new("scheduled"),
+            eligibility: SchedulingEligibilityV1 {
+                paused: true,
+                not_before: Some(not_before),
+            },
+        }],
+    };
+
+    let mut disabled = service(Store::default());
+    assert_eq!(
+        disabled
+            .invoke(execute(
+                1,
+                MutationV1::SubmitScheduledGraph {
+                    expected: StateRevision::ZERO,
+                    tasks: match &command {
+                        MutationV1::SubmitScheduledGraph { tasks, .. } => tasks.clone(),
+                        _ => unreachable!(),
+                    },
+                },
+            ))
+            .unwrap(),
+        Ok(InvocationResponseV1::Outcome {
+            serial: 1,
+            result: MutationOutcomeV1::Refused(MutationCodeV1::SchedulingNotEnabled),
+        })
+    );
+    assert!(matches!(
+        disabled
+            .dispatch(RequestV1::Snapshot {
+                task: "scheduled".into()
+            })
+            .unwrap(),
+        Ok(ResponseV1::Snapshot(None))
+    ));
+
+    let store = Store::default();
+    let mut service = service(store.clone());
+    service.enable_allocation_receipts().unwrap();
+    assert!(matches!(
+        service
+            .dispatch_scheduling(Q::Control {
+                expected: StateRevision::ZERO,
+                command: chronos_engine::SchedulingCommandV1::Enable,
+            })
+            .unwrap(),
+        Ok(R::Outcome(Ok(())))
+    ));
+    let expected = Ok(InvocationResponseV1::Outcome {
+        serial: 1,
+        result: MutationOutcomeV1::Applied,
+    });
+    assert_eq!(
+        service.invoke(execute(1, command.clone())).unwrap(),
+        expected
+    );
+    let committed = store.state.lock().unwrap().clone();
+    assert_eq!(service.invoke(execute(1, command)).unwrap(), expected);
+    assert_eq!(*store.state.lock().unwrap(), committed);
+
+    let AllocationResultV1::Created(allocation) = service.allocation(id(1)).unwrap().unwrap()
+    else {
+        panic!("scheduled allocation expected")
+    };
+    assert_eq!(allocation.tasks.len(), 1);
+    assert_eq!(allocation.tasks[0].task_id().as_str(), "scheduled");
+    assert!(matches!(
+        service
+            .dispatch_scheduling(Q::Eligibility {
+                task: allocation.tasks[0].clone(),
+            })
+            .unwrap(),
+        Ok(R::Eligibility {
+            eligibility: Some(SchedulingEligibilityV1 {
+                paused: true,
+                not_before: Some(value),
+            }),
+            ..
+        }) if value == not_before
+    ));
+
+    drop(service);
+    let mut reopened = AtomicService::open_existing(
+        store,
+        Policy { release: true },
+        Limits {
+            max_graph_tasks: 4,
+            max_page_entries: 4,
+        },
+        recovery(),
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(
+        reopened
+            .invoke(InvocationRequestV1::Lookup { invocation: id(1) })
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        reopened.allocation(id(1)).unwrap(),
+        Ok(AllocationResultV1::Created(allocation.clone()))
+    );
+    assert!(matches!(
+        reopened
+            .dispatch_scheduling(Q::Eligibility {
+                task: allocation.tasks[0].clone(),
+            })
+            .unwrap(),
+        Ok(R::Eligibility {
+            eligibility: Some(SchedulingEligibilityV1 {
+                paused: true,
+                not_before: Some(value),
+            }),
+            ..
+        }) if value == not_before
+    ));
 }
 #[test]
 fn eviction_never_reopens_a_serial_and_result_disclosure_is_currently_authorized() {

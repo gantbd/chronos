@@ -1,6 +1,7 @@
 use chronos_engine::{
-    Agent, ClaimError, ConditionalError, Engine, EngineLimits, RecoveryLimits,
-    SchedulingCommandV1 as Control, SchedulingEligibilityV1 as Eligibility, Task, TaskState,
+    Agent, ClaimError, ConditionalError, Engine, EngineError, EngineLimits, RecoveryLimits,
+    ScheduledAdmissionErrorV1, ScheduledTaskSpecV1, SchedulingCommandV1 as Control,
+    SchedulingEligibilityV1 as Eligibility, Task, TaskSpecV2, TaskState,
 };
 use std::time::{Duration, SystemTime};
 fn now(seconds: u64) -> SystemTime {
@@ -26,6 +27,114 @@ fn grant(engine: &mut Engine) -> chronos_engine::CapabilityGrant {
             Duration::from_secs(100),
         )
         .unwrap()
+}
+
+#[test]
+fn scheduled_graph_admission_never_exposes_default_claimability() {
+    let mut engine = Engine::new();
+    control(&mut engine, Control::Enable);
+    let references = engine
+        .submit_scheduled_coordination_graph_at_revision(
+            engine.task_state_revision(),
+            vec![ScheduledTaskSpecV1 {
+                task: TaskSpecV2::new("scheduled"),
+                eligibility: Eligibility {
+                    paused: false,
+                    not_before: Some(now(20)),
+                },
+            }],
+        )
+        .unwrap();
+    assert_eq!(references.len(), 1);
+    assert_eq!(references[0].task_id().as_str(), "scheduled");
+    assert_eq!(
+        engine.scheduling_eligibility_v1(&references[0]),
+        Some(Eligibility {
+            paused: false,
+            not_before: Some(now(20)),
+        })
+    );
+    let grant = grant(&mut engine);
+    assert_eq!(
+        engine.claim_task(
+            &grant,
+            &"scheduled".into(),
+            now(19),
+            Duration::from_secs(10)
+        ),
+        Err(ClaimError::TaskNotEligible("scheduled".into()))
+    );
+}
+
+#[test]
+fn scheduled_graph_refusal_publishes_neither_graph_nor_eligibility() {
+    let mut engine = Engine::new();
+    control(&mut engine, Control::Enable);
+    engine
+        .submit_scheduled_coordination_graph_at_revision(
+            engine.task_state_revision(),
+            vec![ScheduledTaskSpecV1 {
+                task: TaskSpecV2::new("existing"),
+                eligibility: Eligibility {
+                    paused: true,
+                    not_before: None,
+                },
+            }],
+        )
+        .unwrap();
+    let existing = engine.task_reference(&"existing".into()).unwrap();
+    let before = engine.task_state_revision();
+    assert_eq!(
+        engine.submit_scheduled_coordination_graph_at_revision(
+            before,
+            vec![
+                ScheduledTaskSpecV1 {
+                    task: TaskSpecV2::new("new"),
+                    eligibility: Eligibility {
+                        paused: true,
+                        not_before: Some(now(30)),
+                    },
+                },
+                ScheduledTaskSpecV1 {
+                    task: TaskSpecV2::new("existing"),
+                    eligibility: Eligibility::default(),
+                },
+            ],
+        ),
+        Err(ConditionalError::Domain(ScheduledAdmissionErrorV1::Graph(
+            EngineError::DuplicateTask("existing".into())
+        )))
+    );
+    assert_eq!(engine.task_state_revision(), before);
+    assert!(engine.task_reference(&"new".into()).is_none());
+    assert_eq!(
+        engine.scheduling_eligibility_v1(&existing),
+        Some(Eligibility {
+            paused: true,
+            not_before: None
+        })
+    );
+}
+
+#[test]
+fn scheduled_graph_requires_explicit_scheduling_profile() {
+    let mut engine = Engine::new();
+    assert_eq!(
+        engine.submit_scheduled_coordination_graph_at_revision(
+            engine.task_state_revision(),
+            vec![ScheduledTaskSpecV1 {
+                task: TaskSpecV2::new("hidden"),
+                eligibility: Eligibility {
+                    paused: true,
+                    not_before: None,
+                },
+            }]
+        ),
+        Err(ConditionalError::Domain(
+            ScheduledAdmissionErrorV1::SchedulingNotEnabled
+        ))
+    );
+    assert!(engine.task_reference(&"hidden".into()).is_none());
 }
 #[test]
 fn not_before_applies_to_targeted_and_automatic_claims_without_hiding_other_work() {

@@ -1,5 +1,5 @@
 //! Opt-in durable invocation contract. Correlation is not a credential.
-use chronos_engine::{StateRevision, TaskRefV1, TaskSpecV2};
+use chronos_engine::{ScheduledTaskSpecV1, StateRevision, TaskRefV1, TaskSpecV2};
 
 /// A caller-selected intent key paired with the observed next serial. A serial
 /// is consumed only by an admitted invocation. Competing serials conflict;
@@ -21,6 +21,10 @@ pub enum MutationV1 {
     SubmitGraph {
         expected: StateRevision,
         tasks: Vec<TaskSpecV2>,
+    },
+    SubmitScheduledGraph {
+        expected: StateRevision,
+        tasks: Vec<ScheduledTaskSpecV1>,
     },
     Cancel {
         expected: StateRevision,
@@ -52,9 +56,10 @@ pub enum MutationCodeV1 {
     AlreadyTerminal,
     NotTerminal,
     ReferencedBy,
+    SchedulingNotEnabled,
 }
 impl MutationCodeV1 {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::InvalidTaskId,
         Self::DuplicateTask,
         Self::UnknownDependency,
@@ -73,6 +78,7 @@ impl MutationCodeV1 {
         Self::AlreadyTerminal,
         Self::NotTerminal,
         Self::ReferencedBy,
+        Self::SchedulingNotEnabled,
     ];
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -3,7 +3,7 @@
 use crate::{
     AcknowledgementError, AcknowledgementStrength, Checkpoint, CheckpointError, CommitReceipt,
     ConditionalError, Disposition, Engine, Observation, Operation, Recorder, StateRevision, Task,
-    TaskAttemptRefV1, TaskRefV1, TaskState,
+    TaskAttemptRefV1, TaskRefV1, TaskSpecV2, TaskState,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -14,6 +14,28 @@ use std::{
 pub struct SchedulingEligibilityV1 {
     pub paused: bool,
     pub not_before: Option<SystemTime>,
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct ScheduledTaskSpecV1 {
+    pub task: TaskSpecV2,
+    pub eligibility: SchedulingEligibilityV1,
+}
+
+impl std::fmt::Debug for ScheduledTaskSpecV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ScheduledTaskSpecV1")
+            .field("task", &self.task)
+            .field("eligibility", &self.eligibility)
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScheduledAdmissionErrorV1 {
+    SchedulingNotEnabled,
+    Graph(crate::EngineError),
 }
 impl std::fmt::Debug for SchedulingEligibilityV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -77,6 +99,57 @@ pub struct ConcurrencyUsageV1 {
 }
 type Outcome = Result<(), ConditionalError<SchedulingControlErrorV1>>;
 impl Engine {
+    /// Atomically publishes a minimized coordination graph with eligibility
+    /// bound to each newly allocated exact incarnation. Every graph and profile
+    /// precondition is checked before graph publication; after publication the
+    /// bounded eligibility insertions are infallible and no intermediate state
+    /// escapes this owner.
+    pub fn submit_scheduled_coordination_graph_at_revision(
+        &mut self,
+        expected: StateRevision,
+        tasks: Vec<ScheduledTaskSpecV1>,
+    ) -> Result<Vec<TaskRefV1>, ConditionalError<ScheduledAdmissionErrorV1>> {
+        self.guard_revision(expected)?;
+        if self.scheduling_controls.is_none() {
+            return Err(ConditionalError::Domain(
+                ScheduledAdmissionErrorV1::SchedulingNotEnabled,
+            ));
+        }
+        let specifications: Vec<_> = tasks.iter().map(|value| value.task.clone()).collect();
+        self.submit_graph(
+            specifications
+                .into_iter()
+                .map(TaskSpecV2::into_task)
+                .collect(),
+        )
+        .map_err(|error| ConditionalError::Domain(ScheduledAdmissionErrorV1::Graph(error)))?;
+
+        let bindings: Vec<_> = tasks
+            .into_iter()
+            .map(|value| {
+                let reference = self
+                    .task_reference(&value.task.id)
+                    .expect("successfully admitted task has an exact reference");
+                (reference, value.eligibility)
+            })
+            .collect();
+        let controls = self.scheduling_controls.as_mut().expect("checked profile");
+        let mut changed = false;
+        for (reference, eligibility) in &bindings {
+            if *eligibility != SchedulingEligibilityV1::default() {
+                controls.eligibility.insert(reference.clone(), *eligibility);
+                changed = true;
+            }
+        }
+        if changed {
+            self.advance_task_revision();
+        }
+        Ok(bindings
+            .into_iter()
+            .map(|(reference, _)| reference)
+            .collect())
+    }
+
     pub(crate) fn scheduling_payload_usage(&self) -> Option<usize> {
         let Some(controls) = &self.scheduling_controls else {
             return Some(0);

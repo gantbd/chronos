@@ -78,9 +78,17 @@ pub fn invocation_response(reply: native::InvocationReplyV1) -> wire::Response {
                     native::MutationOutcomeV1::RevisionExhausted => {
                         wire::MutationResult::RevisionExhausted {}
                     }
-                    native::MutationOutcomeV1::Refused(code) => wire::MutationResult::Refused {
-                        code: mutation_code(code),
-                    },
+                    native::MutationOutcomeV1::Refused(code) => {
+                        let Some(code) = mutation_code(code) else {
+                            return wire::Response {
+                                version: 3,
+                                outcome: wire::Outcome::Refused {
+                                    code: wire::RefusalCode::Unavailable,
+                                },
+                            };
+                        };
+                        wire::MutationResult::Refused { code }
+                    }
                 },
             }
         }
@@ -90,8 +98,8 @@ pub fn invocation_response(reply: native::InvocationReplyV1) -> wire::Response {
         outcome,
     }
 }
-fn mutation_code(code: native::MutationCodeV1) -> wire::MutationCode {
-    macro_rules! map {($($variant:ident),+)=>{match code {$(native::MutationCodeV1::$variant=>wire::MutationCode::$variant,)+}};}
+fn mutation_code(code: native::MutationCodeV1) -> Option<wire::MutationCode> {
+    macro_rules! map {($($variant:ident),+)=>{match code {$(native::MutationCodeV1::$variant=>Some(wire::MutationCode::$variant),)+ native::MutationCodeV1::SchedulingNotEnabled => None}};}
     map!(
         InvalidTaskId,
         DuplicateTask,
