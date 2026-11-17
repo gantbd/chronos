@@ -2,7 +2,7 @@ use chronos_adapter_native::EmbeddedClient;
 use chronos_client::WireClientV1;
 use chronos_engine::{Engine, StateRevision, TaskSpecV2};
 use chronos_host::ClientV1;
-use chronos_model::{Action, DispatchError, Model, Worker};
+use chronos_model::{Action, DispatchError, MAX_SUBMIT_BATCH, Model, Worker};
 use chronos_service::{Authorizer, Limits, Service};
 use std::sync::{
     Arc, Mutex,
@@ -27,11 +27,15 @@ impl ClientV1 for Shared {
     }
 }
 fn backend() -> Shared {
+    backend_with(&["a", "b"])
+}
+
+fn backend_with(ids: &[&str]) -> Shared {
     let mut engine = Engine::new();
     engine
         .submit_coordination_graph_at_revision(
             StateRevision::ZERO,
-            vec![TaskSpecV2::new("a"), TaskSpecV2::new("b")],
+            ids.iter().map(|id| TaskSpecV2::new(*id)).collect(),
         )
         .unwrap();
     Shared(Arc::new(Mutex::new(Service::new(
@@ -42,6 +46,87 @@ fn backend() -> Shared {
             max_page_entries: 64,
         },
     ))))
+}
+
+#[test]
+fn marked_cancellation_reobserves_each_child_and_retains_independent_receipts() {
+    use chronos_model::CancelDisposition;
+
+    let mut model = Model::new(client(backend_with(&["a", "b", "c"])), true);
+    model.apply(Action::Refresh);
+    for index in 0..3 {
+        model.apply(Action::Select(index));
+        model.apply(Action::ToggleCancelSelection);
+    }
+    model.apply(Action::PlanCancel);
+    assert_eq!(model.view.pending_cancel.as_deref(), Some("3 marked tasks"));
+    model.apply(Action::ConfirmCancel);
+
+    assert!(model.view.status.starts_with("Applied 3/3"));
+    assert!(model.view.rows.iter().all(|row| row.phase == "cancelled"));
+    assert_eq!(model.view.cancel_receipts.len(), 3);
+    assert!(
+        model
+            .view
+            .cancel_receipts
+            .iter()
+            .all(|receipt| receipt.disposition == CancelDisposition::Applied)
+    );
+    assert!(model.view.marked_cancel.is_empty());
+}
+
+#[test]
+fn marked_cancellation_stops_after_unknown_and_never_sends_later_children() {
+    use chronos_model::CancelDisposition;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let shared = backend_with(&["a", "b", "c"]);
+    let mut model = Model::new(
+        Faulty {
+            inner: client(shared.clone()),
+            calls: calls.clone(),
+            // refresh, cancel a, reobserve, cancel b (owner applies, reply is lost)
+            fail_at: 4,
+            after: true,
+        },
+        true,
+    );
+    model.apply(Action::Refresh);
+    for index in 0..3 {
+        model.apply(Action::Select(index));
+        model.apply(Action::ToggleCancelSelection);
+    }
+    model.apply(Action::PlanCancel);
+    model.apply(Action::ConfirmCancel);
+
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        model
+            .view
+            .cancel_receipts
+            .iter()
+            .map(|receipt| receipt.disposition)
+            .collect::<Vec<_>>(),
+        vec![
+            CancelDisposition::Applied,
+            CancelDisposition::OutcomeUnknown,
+            CancelDisposition::NotSent,
+        ]
+    );
+    assert!(model.view.manual_refresh_required);
+
+    let mut observer = Model::new(client(shared), false);
+    observer.apply(Action::Refresh);
+    assert_eq!(
+        observer
+            .view
+            .rows
+            .iter()
+            .find(|row| row.reference.task == "c")
+            .unwrap()
+            .phase,
+        "ready"
+    );
 }
 fn client(shared: Shared) -> EmbeddedClient<Shared> {
     EmbeddedClient::new(
@@ -205,6 +290,40 @@ fn task_input_is_byte_bounded_and_display_cannot_inject_terminal_controls() {
     let escaped = chronos_model::display_id("a\u{1b}[2J\u{202e}");
     assert!(!escaped.contains('\u{1b}'));
     assert!(!escaped.contains('\u{202e}'));
+}
+
+#[test]
+fn task_batch_is_one_atomic_graph_and_rejects_invalid_cardinality() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut model = Model::new(
+        Faulty {
+            inner: client(backend()),
+            calls: calls.clone(),
+            fail_at: usize::MAX,
+            after: false,
+        },
+        true,
+    );
+    model.apply(Action::Refresh);
+    model.apply(Action::SubmitBatch(vec![
+        "c".into(),
+        "d".into(),
+        "e".into(),
+    ]));
+    assert_eq!(model.view.rows.len(), 5);
+    // Initial page + one SubmitGraph + one post-receipt page. The TUI/model
+    // never turns N tasks into N mutation requests.
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+    model.apply(Action::SubmitBatch(vec![
+        "duplicate".into(),
+        "duplicate".into(),
+    ]));
+    assert!(model.view.status.contains("unique"));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
+    model.apply(Action::SubmitBatch(vec!["x".into(); MAX_SUBMIT_BATCH + 1]));
+    assert!(model.view.status.contains("128"));
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
 }
 
 #[test]

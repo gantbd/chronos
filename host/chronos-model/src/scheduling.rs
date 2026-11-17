@@ -2,10 +2,17 @@ use super::*;
 use chronos_protocol::scheduling_v5 as v5;
 use std::time::{SystemTime, UNIX_EPOCH};
 type Call<C> = fn(&mut C, v5::Request) -> Result<v5::Response, ()>;
+pub(super) enum Pending {
+    One(v5::Request),
+    EligibilityBatch {
+        targets: Vec<SelectedEligibility>,
+        edit: EligibilityEdit,
+    },
+}
 pub(super) struct State<C> {
     call: Option<Call<C>>,
     revision: Option<Revision>,
-    pub(super) pending: Option<v5::Request>,
+    pub(super) pending: Option<Pending>,
 }
 impl<C> Default for State<C> {
     fn default() -> Self {
@@ -36,6 +43,8 @@ pub struct SchedulingView {
     pub held: Option<usize>,
     pub available: Option<usize>,
     pub selected: Option<SelectedEligibility>,
+    pub marked: Vec<SelectedEligibility>,
+    pub eligibility_receipts: Vec<EligibilityReceipt>,
     pub pending: Option<String>,
     pub status: String,
     pub signals: ClientSignals,
@@ -55,6 +64,8 @@ impl Default for SchedulingView {
             held: None,
             available: None,
             selected: None,
+            marked: Vec::new(),
+            eligibility_receipts: Vec::new(),
             pending: None,
             status: "Scheduling profile not selected.".into(),
             signals: ClientSignals::default(),
@@ -66,10 +77,27 @@ pub enum SchedulingChange {
     Enable,
     SetPaused(bool),
     SetConcurrencyLimit(usize),
-    SetSelectedEligibility {
-        paused: bool,
-        not_before: Option<SystemTime>,
-    },
+    SetEligibility(EligibilityEdit),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum EligibilityEdit {
+    SetPaused(bool),
+    SetNotBefore(Option<SystemTime>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EligibilityDisposition {
+    Applied,
+    Refused,
+    OutcomeUnknown,
+    NotSent,
+}
+
+#[derive(Clone, Debug)]
+pub struct EligibilityReceipt {
+    pub reference: Reference,
+    pub disposition: EligibilityDisposition,
 }
 fn timestamp(value: SystemTime) -> v5::Timestamp {
     let (before_epoch, duration) = match value.duration_since(UNIX_EPOCH) {
@@ -105,12 +133,14 @@ impl<C: WireClientV1> Model<C> {
         let supported = self.scheduling.call.is_some();
         let signals = self.view.scheduling.signals;
         let residence_buckets = self.view.scheduling.residence_buckets;
+        let eligibility_receipts = std::mem::take(&mut self.view.scheduling.eligibility_receipts);
         self.scheduling.revision = None;
         self.scheduling.pending = None;
         self.view.scheduling = SchedulingView {
             supported,
             signals,
             residence_buckets,
+            eligibility_receipts,
             status: status.into(),
             ..Default::default()
         };
@@ -207,52 +237,89 @@ impl<C: WireClientV1> Model<C> {
             self.view.scheduling.held = Some(u.held);
             self.view.scheduling.available = Some(u.available);
         }
-        if self.view.scheduling.enabled
-            && let Some(row) = self.view.rows.get(self.view.selected)
-        {
-            let task = row.reference.clone();
-            let Ok(v5::Response {
-                outcome:
-                    v5::Outcome::Eligibility {
-                        revision: observed,
-                        eligibility,
-                        task,
-                    },
-                ..
-            }) = self.scheduling_request(v5::Command::Eligibility { task })
-            else {
-                self.invalidate_scheduling(
-                    "Selected eligibility unavailable; refresh before controls.",
-                );
-                return;
-            };
-            if !same_revision(&revision, &observed) {
-                self.invalidate_scheduling(
-                    "Scheduling changed during observation; refresh without retargeting.",
-                );
-                return;
+        if self.view.scheduling.enabled {
+            let selected = self
+                .view
+                .rows
+                .get(self.view.selected)
+                .map(|row| row.reference.clone());
+            let marked = self.view.marked_cancel.clone();
+            let mut targets = marked.clone();
+            if let Some(selected) = &selected
+                && !targets
+                    .iter()
+                    .any(|target| same_reference(target, selected))
+            {
+                targets.push(selected.clone());
             }
-            if let Some(e) = eligibility {
-                let not_before = match e.not_before {
-                    Some(time) => match native_time(time) {
-                        Some(time) => Some(time),
-                        None => {
-                            self.invalidate_scheduling("Timestamp unsupported on this host.");
-                            return;
-                        }
-                    },
-                    None => None,
+            for task in targets {
+                let Ok(v5::Response {
+                    outcome:
+                        v5::Outcome::Eligibility {
+                            revision: observed,
+                            eligibility,
+                            task,
+                        },
+                    ..
+                }) = self.scheduling_request(v5::Command::Eligibility { task })
+                else {
+                    self.invalidate_scheduling(
+                        "Selected eligibility unavailable; refresh before controls.",
+                    );
+                    return;
                 };
-                self.view.scheduling.selected = Some(SelectedEligibility {
-                    reference: task,
-                    paused: e.paused,
-                    not_before,
-                });
+                if !same_revision(&revision, &observed) {
+                    self.invalidate_scheduling(
+                        "Scheduling changed during observation; refresh without retargeting.",
+                    );
+                    return;
+                }
+                if let Some(e) = eligibility {
+                    let not_before = match e.not_before {
+                        Some(time) => match native_time(time) {
+                            Some(time) => Some(time),
+                            None => {
+                                self.invalidate_scheduling("Timestamp unsupported on this host.");
+                                return;
+                            }
+                        },
+                        None => None,
+                    };
+                    let observed = SelectedEligibility {
+                        reference: task,
+                        paused: e.paused,
+                        not_before,
+                    };
+                    if selected
+                        .as_ref()
+                        .is_some_and(|selected| same_reference(selected, &observed.reference))
+                    {
+                        self.view.scheduling.selected = Some(observed.clone());
+                    }
+                    if marked
+                        .iter()
+                        .any(|marked| same_reference(marked, &observed.reference))
+                    {
+                        self.view.scheduling.marked.push(observed);
+                    }
+                } else {
+                    self.invalidate_scheduling(
+                    "Marked or selected task eligibility disappeared; refresh tasks without retargeting.",
+                );
+                    return;
+                }
             }
         }
         self.view.scheduling.mutation_blocked = matches!(revision, Revision::Exhausted);
-        self.view.scheduling.status =
-            "Observed scheduling. Pausing blocks new claims; existing execution continues.".into();
+        self.view.scheduling.status = format!(
+            "Observed scheduling and {} marked task eligibilit{}. Pausing blocks new claims; existing execution continues.",
+            self.view.scheduling.marked.len(),
+            if self.view.scheduling.marked.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
         self.scheduling.revision = Some(revision);
     }
     pub(super) fn plan_scheduling(&mut self, change: SchedulingChange) {
@@ -282,42 +349,67 @@ impl<C: WireClientV1> Model<C> {
                 v5::Command::SetConcurrencyLimit { expected, limit },
                 format!("Set concurrency capacity to {limit}"),
             ),
-            SchedulingChange::SetSelectedEligibility { paused, not_before } => {
-                let Some(selected) = &self.view.scheduling.selected else {
-                    self.view.scheduling.status =
-                        "Refresh exact selected-task eligibility first.".into();
-                    return;
+            SchedulingChange::SetEligibility(edit) => {
+                let targets = if self.view.marked_cancel.is_empty() {
+                    self.view.scheduling.selected.iter().cloned().collect()
+                } else {
+                    self.view.scheduling.marked.clone()
                 };
-                (
-                    v5::Command::SetEligibility {
-                        expected,
-                        task: selected.reference.clone(),
-                        eligibility: v5::Eligibility {
-                            paused,
-                            not_before: not_before.map(timestamp),
-                        },
-                    },
-                    format!(
-                        "Set eligibility for {} at its observed incarnation",
-                        display_id(&selected.reference.task)
+                if targets.is_empty()
+                    || (!self.view.marked_cancel.is_empty()
+                        && targets.len() != self.view.marked_cancel.len())
+                {
+                    self.view.scheduling.status =
+                        "Refresh every exact marked-task eligibility before proposing the control."
+                            .into();
+                    return;
+                }
+                let label = match edit {
+                    EligibilityEdit::SetPaused(paused) => format!(
+                        "Set task pause to {paused} for {} exact task{}",
+                        targets.len(),
+                        if targets.len() == 1 { "" } else { "s" }
                     ),
-                )
+                    EligibilityEdit::SetNotBefore(not_before) => format!(
+                        "Set not-before to {} for {} exact task{}",
+                        not_before.map_or_else(
+                            || "clear".into(),
+                            |value| {
+                                let value = timestamp(value);
+                                format!("{}.{:09}", value.seconds, value.nanos)
+                            }
+                        ),
+                        targets.len(),
+                        if targets.len() == 1 { "" } else { "s" }
+                    ),
+                };
+                self.scheduling.pending = Some(Pending::EligibilityBatch { targets, edit });
+                self.view.scheduling.pending = Some(label);
+                self.view.scheduling.status = "Confirm the bounded eligibility run. Every child is reobserved against the latest owner revision and settled independently.".into();
+                return;
             }
         };
-        self.scheduling.pending = Some(v5::Request {
+        self.scheduling.pending = Some(Pending::One(v5::Request {
             version: 5,
             command,
-        });
+        }));
         self.view.scheduling.pending = Some(label);
         self.view.scheduling.status =
             "Confirm the exact proposed control and revision. No execution will be interrupted."
                 .into();
     }
     pub(super) fn confirm_scheduling(&mut self) {
-        let Some(request) = self.scheduling.pending.take() else {
+        let Some(pending) = self.scheduling.pending.take() else {
             return;
         };
         self.view.scheduling.pending = None;
+        if let Pending::EligibilityBatch { targets, edit } = pending {
+            self.confirm_eligibility_batch(targets, edit);
+            return;
+        }
+        let Pending::One(request) = pending else {
+            unreachable!()
+        };
         let result = self.scheduling_request(request.command);
         self.view.manual_refresh_required = true;
         self.invalidate("Task view is stale after a scheduling control; refresh explicitly.");
@@ -341,6 +433,156 @@ impl<C: WireClientV1> Model<C> {
         };
         self.invalidate_scheduling(status);
     }
+
+    fn confirm_eligibility_batch(
+        &mut self,
+        targets: Vec<SelectedEligibility>,
+        edit: EligibilityEdit,
+    ) {
+        let total = targets.len();
+        self.view.scheduling.eligibility_receipts = targets
+            .iter()
+            .map(|target| EligibilityReceipt {
+                reference: target.reference.clone(),
+                disposition: EligibilityDisposition::NotSent,
+            })
+            .collect();
+        let mut applied = 0usize;
+        for (index, target) in targets.into_iter().enumerate() {
+            let revision = match self.scheduling_request(v5::Command::Overview {
+                now: timestamp(SystemTime::now()),
+            }) {
+                Ok(v5::Response {
+                    outcome:
+                        v5::Outcome::Overview {
+                            revision: Revision::Finite(revision),
+                            controls: Some(_),
+                            ..
+                        },
+                    ..
+                }) => Revision::Finite(revision),
+                _ => {
+                    self.finish_eligibility_batch(
+                        false,
+                        format!(
+                            "Eligibility run stopped before child {} of {total}: current owner revision was unavailable; this and later children were not sent.",
+                            index + 1
+                        ),
+                    );
+                    return;
+                }
+            };
+            let current = match self.scheduling_request(v5::Command::Eligibility {
+                task: target.reference.clone(),
+            }) {
+                Ok(v5::Response {
+                    outcome:
+                        v5::Outcome::Eligibility {
+                            revision: observed,
+                            eligibility: Some(eligibility),
+                            ..
+                        },
+                    ..
+                }) if same_revision(&revision, &observed) => eligibility,
+                _ => {
+                    self.finish_eligibility_batch(
+                        false,
+                        format!(
+                            "Eligibility run stopped before child {} of {total}: exact task eligibility was unavailable or changed; this and later children were not sent.",
+                            index + 1
+                        ),
+                    );
+                    return;
+                }
+            };
+            let eligibility = match edit {
+                EligibilityEdit::SetPaused(paused) => v5::Eligibility {
+                    paused,
+                    not_before: current.not_before,
+                },
+                EligibilityEdit::SetNotBefore(not_before) => v5::Eligibility {
+                    paused: current.paused,
+                    not_before: not_before.map(timestamp),
+                },
+            };
+            match self.scheduling_request(v5::Command::SetEligibility {
+                expected: revision,
+                task: target.reference,
+                eligibility,
+            }) {
+                Ok(v5::Response {
+                    outcome:
+                        v5::Outcome::Control {
+                            result: v5::ControlResult::Applied {},
+                        },
+                    ..
+                }) => {
+                    self.view.scheduling.eligibility_receipts[index].disposition =
+                        EligibilityDisposition::Applied;
+                    applied += 1;
+                }
+                Ok(v5::Response {
+                    outcome:
+                        v5::Outcome::Control {
+                            result:
+                                v5::ControlResult::Rejected { .. }
+                                | v5::ControlResult::RevisionMismatch { .. }
+                                | v5::ControlResult::RevisionExhausted {},
+                        },
+                    ..
+                })
+                | Ok(v5::Response {
+                    outcome:
+                        v5::Outcome::Refused {
+                            code:
+                                v5::RefusalCode::Unauthorized
+                                | v5::RefusalCode::Limit
+                                | v5::RefusalCode::InvalidRequest
+                                | v5::RefusalCode::Capacity
+                                | v5::RefusalCode::StaleView,
+                        },
+                    ..
+                }) => {
+                    self.view.scheduling.eligibility_receipts[index].disposition =
+                        EligibilityDisposition::Refused;
+                    self.finish_eligibility_batch(
+                        applied > 0,
+                        format!(
+                            "Eligibility child {} of {total} was refused after {applied} applied; later children were not sent.",
+                            index + 1
+                        ),
+                    );
+                    return;
+                }
+                _ => {
+                    self.view.scheduling.eligibility_receipts[index].disposition =
+                        EligibilityDisposition::OutcomeUnknown;
+                    self.finish_eligibility_batch(
+                        true,
+                        format!(
+                            "Eligibility child {} of {total} has an unknown outcome after {applied} proven applied; later children were not sent. Inspect explicitly and never replay automatically.",
+                            index + 1
+                        ),
+                    );
+                    return;
+                }
+            }
+        }
+        self.finish_eligibility_batch(
+            applied > 0,
+            format!("Applied {applied}/{total} independently settled task eligibility controls."),
+        );
+    }
+
+    fn finish_eligibility_batch(&mut self, task_view_stale: bool, status: String) {
+        if task_view_stale {
+            self.view.manual_refresh_required = true;
+            self.invalidate(
+                "Task view is stale after task eligibility controls; refresh explicitly.",
+            );
+        }
+        self.invalidate_scheduling(&status);
+    }
 }
 fn same_revision(a: &Revision, b: &Revision) -> bool {
     match (a, b) {
@@ -348,4 +590,8 @@ fn same_revision(a: &Revision, b: &Revision) -> bool {
         (Revision::Exhausted, Revision::Exhausted) => true,
         _ => false,
     }
+}
+
+fn same_reference(a: &Reference, b: &Reference) -> bool {
+    a.task == b.task && a.incarnation == b.incarnation
 }

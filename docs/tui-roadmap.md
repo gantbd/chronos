@@ -153,11 +153,20 @@ launcher’s per-workstream Moira and Daimon options, verified that an abandoned
 receipt stayed discarded, and observed one provider dispatch for fixture seeding.
 
 The first operator action is available on the Chronos task side. The opt-in
-`--cancel-receipts` hub flag routes guarded cancellation through Chronos V3
-with an exact revision, task incarnation, and invocation receipt. Tmux
-verified that cancellation consumed one V3 invocation and left the other
-workstream untouched. The daemon test verified read-only receipt recovery
-after a lost reply and confirmed replay left the task revision unchanged.
+`--cancel-receipts` hub flag routes a bounded marked task set through Chronos V3
+with an exact revision, task incarnation, and independent invocation receipt
+per child. It reobserves between children and stops on an unresolved receipt;
+later children remain explicitly not sent. Model qualification proves a lost
+second reply never dispatches the third child. Tmux verified three durable
+cancellations through Pantheon and an independent service reopen. The daemon
+test continues to verify read-only receipt recovery without replaying an effect.
+Marked task eligibility now covers the corresponding plural scheduling work.
+Pause and not-before reobserve the V5 overview and exact task eligibility before
+each child, preserve the unrelated field, and retain independent dispositions.
+Because V5 has neither a multi-task atomic command nor an invocation lookup, an
+unknown child stops the run and fences every later child as not sent. The real
+Pantheon-hosted journey applies both controls to three tasks and verifies them
+after an independent durable reopen.
 
 Daimon's Inspect returns status for one known execution under the current
 principal. For the first roster, the Daimon host owns presence for agents it

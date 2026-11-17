@@ -2,7 +2,7 @@ use chronos_adapter_native::EmbeddedClient;
 use chronos_client::{SchedulingWireClientV5, WireClientV1};
 use chronos_engine::{Engine, StateRevision, TaskSpecV2};
 use chronos_host::{ClientV1, native::*, scheduling::*};
-use chronos_model::{Action, DispatchError, Model, SchedulingChange, Worker};
+use chronos_model::{Action, DispatchError, EligibilityEdit, Model, SchedulingChange, Worker};
 use chronos_protocol::{Limits, Request, Response, scheduling_v5 as v5};
 use chronos_service::{Authorizer, Service, scheduling::SchedulingAuthorizerV1};
 use std::{
@@ -45,11 +45,17 @@ impl SchedulingClientV1 for Shared {
     }
 }
 fn backend() -> Shared {
+    backend_with(&["one", "two"])
+}
+fn backend_three() -> Shared {
+    backend_with(&["one", "two", "three"])
+}
+fn backend_with(ids: &[&str]) -> Shared {
     let mut engine = Engine::new();
     engine
         .submit_coordination_graph_at_revision(
             StateRevision::ZERO,
-            vec![TaskSpecV2::new("one"), TaskSpecV2::new("two")],
+            ids.iter().map(|id| TaskSpecV2::new(*id)).collect(),
         )
         .unwrap();
     Shared(Arc::new(Mutex::new(Service::new(
@@ -110,12 +116,9 @@ fn selection_changes_discard_plans_and_exact_task_eligibility_preserves_time() {
     model.apply(Action::Refresh);
     refresh(&mut model);
     let not_before = SystemTime::UNIX_EPOCH - Duration::from_nanos(1);
-    model.apply(Action::PlanScheduling(
-        SchedulingChange::SetSelectedEligibility {
-            paused: true,
-            not_before: Some(not_before),
-        },
-    ));
+    model.apply(Action::PlanScheduling(SchedulingChange::SetEligibility(
+        EligibilityEdit::SetNotBefore(Some(not_before)),
+    )));
     assert!(model.view.scheduling.pending.is_some());
     model.apply(Action::Down);
     model.apply(Action::ConfirmScheduling);
@@ -132,16 +135,21 @@ fn selection_changes_discard_plans_and_exact_task_eligibility_preserves_time() {
             .task,
         "two"
     );
-    model.apply(Action::PlanScheduling(
-        SchedulingChange::SetSelectedEligibility {
-            paused: true,
-            not_before: Some(not_before),
-        },
-    ));
+    model.apply(Action::PlanScheduling(SchedulingChange::SetEligibility(
+        EligibilityEdit::SetNotBefore(Some(not_before)),
+    )));
     model.apply(Action::ConfirmScheduling);
     model.apply(Action::Refresh);
+    model.apply(Action::Down);
     refresh(&mut model);
-    assert!(!model.view.scheduling.selected.as_ref().unwrap().paused);
+    let selected = model.view.scheduling.selected.as_ref().unwrap();
+    assert!(!selected.paused);
+    assert_eq!(selected.not_before, Some(not_before));
+    model.apply(Action::PlanScheduling(SchedulingChange::SetEligibility(
+        EligibilityEdit::SetPaused(true),
+    )));
+    model.apply(Action::ConfirmScheduling);
+    model.apply(Action::Refresh);
     model.apply(Action::Down);
     refresh(&mut model);
     let selected = model.view.scheduling.selected.as_ref().unwrap();
@@ -323,4 +331,134 @@ fn controls_changing_between_overview_and_eligibility_invalidate_the_whole_proje
     model.apply(Action::PlanScheduling(SchedulingChange::SetPaused(false)));
     model.apply(Action::ConfirmScheduling);
     assert_eq!(model.view.scheduling.signals.requests, 2);
+}
+
+#[test]
+fn marked_eligibility_run_reobserves_and_settles_every_child() {
+    use chronos_model::EligibilityDisposition;
+
+    let shared = backend_three();
+    let mut model = Model::new(client(shared), true).with_scheduling();
+    model.apply(Action::Refresh);
+    refresh(&mut model);
+    model.apply(Action::PlanScheduling(SchedulingChange::Enable));
+    model.apply(Action::ConfirmScheduling);
+    model.apply(Action::Refresh);
+    for index in 0..3 {
+        model.apply(Action::Select(index));
+        model.apply(Action::ToggleCancelSelection);
+    }
+    refresh(&mut model);
+    assert_eq!(model.view.scheduling.marked.len(), 3);
+    model.apply(Action::PlanScheduling(SchedulingChange::SetEligibility(
+        EligibilityEdit::SetPaused(true),
+    )));
+    model.apply(Action::ConfirmScheduling);
+
+    assert!(model.view.scheduling.status.starts_with("Applied 3/3"));
+    assert!(
+        model
+            .view
+            .scheduling
+            .eligibility_receipts
+            .iter()
+            .all(|receipt| receipt.disposition == EligibilityDisposition::Applied)
+    );
+    model.apply(Action::Refresh);
+    refresh(&mut model);
+    assert!(
+        model
+            .view
+            .scheduling
+            .marked
+            .iter()
+            .all(|target| target.paused)
+    );
+}
+
+struct LoseEligibility {
+    inner: EmbeddedClient<Shared>,
+    mutation: usize,
+    lose_at: usize,
+}
+impl WireClientV1 for LoseEligibility {
+    type Error = ();
+    fn request(&mut self, request: Request) -> Result<Response, ()> {
+        self.inner.request(request).map_err(|_| ())
+    }
+}
+impl SchedulingWireClientV5 for LoseEligibility {
+    type Error = ();
+    fn request_scheduling_v5(&mut self, request: v5::Request) -> Result<v5::Response, ()> {
+        let mutation = matches!(request.command, v5::Command::SetEligibility { .. });
+        let response = self.inner.request_scheduling_v5(request).map_err(|_| ())?;
+        if mutation {
+            self.mutation += 1;
+            if self.mutation == self.lose_at {
+                return Err(());
+            }
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn marked_eligibility_stops_after_unknown_and_never_sends_later_children() {
+    use chronos_model::EligibilityDisposition;
+
+    let shared = backend_three();
+    let mut seed = Model::new(client(shared.clone()), true).with_scheduling();
+    refresh(&mut seed);
+    seed.apply(Action::PlanScheduling(SchedulingChange::Enable));
+    seed.apply(Action::ConfirmScheduling);
+
+    let mut model = Model::new(
+        LoseEligibility {
+            inner: client(shared.clone()),
+            mutation: 0,
+            lose_at: 2,
+        },
+        true,
+    )
+    .with_scheduling();
+    model.apply(Action::Refresh);
+    for index in 0..3 {
+        model.apply(Action::Select(index));
+        model.apply(Action::ToggleCancelSelection);
+    }
+    refresh(&mut model);
+    model.apply(Action::PlanScheduling(SchedulingChange::SetEligibility(
+        EligibilityEdit::SetPaused(true),
+    )));
+    model.apply(Action::ConfirmScheduling);
+    assert_eq!(
+        model
+            .view
+            .scheduling
+            .eligibility_receipts
+            .iter()
+            .map(|receipt| receipt.disposition)
+            .collect::<Vec<_>>(),
+        vec![
+            EligibilityDisposition::Applied,
+            EligibilityDisposition::OutcomeUnknown,
+            EligibilityDisposition::NotSent,
+        ]
+    );
+
+    let mut observer = Model::new(client(shared), false).with_scheduling();
+    observer.apply(Action::Refresh);
+    for index in 0..3 {
+        observer.apply(Action::Select(index));
+        observer.apply(Action::ToggleCancelSelection);
+    }
+    refresh(&mut observer);
+    let paused: Vec<_> = observer
+        .view
+        .scheduling
+        .marked
+        .iter()
+        .map(|target| (target.reference.task.as_str(), target.paused))
+        .collect();
+    assert_eq!(paused, vec![("one", true), ("three", true), ("two", false)]);
 }

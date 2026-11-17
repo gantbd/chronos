@@ -8,7 +8,10 @@ use chronos_protocol::{
     Command, Cursor, Failure, FailureCode, Outcome, Phase, Reference, Request, Response,
     RetrySafety, Revision, TaskSpec,
 };
-pub use scheduling::{SchedulingChange, SchedulingView, SelectedEligibility};
+pub use scheduling::{
+    EligibilityDisposition, EligibilityEdit, EligibilityReceipt, SchedulingChange, SchedulingView,
+    SelectedEligibility,
+};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -35,6 +38,10 @@ pub struct View {
     pub status: String,
     pub has_next: bool,
     pub pending_cancel: Option<String>,
+    /// Exact task incarnations explicitly marked for the next cancellation run.
+    pub marked_cancel: Vec<Reference>,
+    /// Durable-in-view child dispositions from the most recent cancellation run.
+    pub cancel_receipts: Vec<CancelReceipt>,
     pub mutation_blocked: bool,
     pub manual_refresh_required: bool,
 }
@@ -49,6 +56,8 @@ impl Default for View {
             status: "Refresh to observe current tasks.".into(),
             has_next: false,
             pending_cancel: None,
+            marked_cancel: Vec::new(),
+            cancel_receipts: Vec::new(),
             mutation_blocked: true,
             manual_refresh_required: false,
         }
@@ -85,10 +94,32 @@ pub enum Action {
     Down,
     Select(usize),
     PlanCancel,
+    ToggleCancelSelection,
     ConfirmCancel,
     DiscardPlan,
     Submit(String),
+    SubmitBatch(Vec<String>),
 }
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancelDisposition {
+    Applied,
+    Refused,
+    OutcomeUnknown,
+    NotSent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CancelReceipt {
+    pub task: String,
+    pub incarnation: String,
+    pub disposition: CancelDisposition,
+}
+
+/// The local operator profile admits one bounded atomic graph per action.
+/// This is a presentation/model ceiling as well as the current local wire
+/// ceiling; other profiles can expose a different dedicated model later.
+pub const MAX_SUBMIT_BATCH: usize = 128;
 
 pub struct Model<C> {
     scheduling: scheduling::State<C>,
@@ -96,7 +127,7 @@ pub struct Model<C> {
     pub view: View,
     revision: Option<Revision>,
     next: Option<Cursor>,
-    pending: Option<(Revision, Reference)>,
+    pending: Option<Vec<Reference>>,
     writes: bool,
 }
 
@@ -148,6 +179,137 @@ impl<C: WireClientV1> Model<C> {
         response
     }
 
+    fn submit_batch(&mut self, ids: Vec<String>) {
+        self.clear_plan();
+        if !self.writes {
+            self.view.status = "This client is read-only.".into();
+            return;
+        }
+        if self.view.mutation_blocked {
+            self.view.status = "Refresh before mutation.".into();
+            return;
+        }
+        if ids.is_empty() || ids.len() > MAX_SUBMIT_BATCH {
+            self.view.status = format!("Submit 1–{MAX_SUBMIT_BATCH} tasks per atomic graph.");
+            return;
+        }
+        if ids.iter().any(|id| id.is_empty() || id.len() > 256) {
+            self.view.status = "Each task ID must be 1–256 UTF-8 bytes.".into();
+            return;
+        }
+        let unique = ids
+            .iter()
+            .map(String::as_str)
+            .collect::<std::collections::HashSet<_>>();
+        if unique.len() != ids.len() {
+            self.view.status = "Task IDs in an atomic graph must be unique.".into();
+            return;
+        }
+        if let Some(expected) = self.revision.clone() {
+            self.mutate(Command::SubmitGraph {
+                expected,
+                tasks: ids
+                    .into_iter()
+                    .map(|id| TaskSpec {
+                        id,
+                        priority: 0,
+                        dependencies: vec![],
+                        capabilities: vec![],
+                        max_attempts: 3,
+                        retry_safety: RetrySafety::FenceUnknown,
+                    })
+                    .collect(),
+            });
+        }
+    }
+
+    fn cancel_batch(&mut self, targets: Vec<Reference>) {
+        self.clear_plan();
+        self.view.cancel_receipts = targets
+            .iter()
+            .map(|target| CancelReceipt {
+                task: target.task.clone(),
+                incarnation: target.incarnation.clone(),
+                disposition: CancelDisposition::NotSent,
+            })
+            .collect();
+        if !self.writes {
+            self.view.status = "This client is read-only; no cancellation was sent.".into();
+            return;
+        }
+        if self.view.mutation_blocked {
+            self.view.status = "Refresh before cancellation; no cancellation was sent.".into();
+            return;
+        }
+
+        let total = targets.len();
+        let mut applied = 0usize;
+        for (index, target) in targets.into_iter().enumerate() {
+            let current = self.view.rows.iter().any(|row| {
+                row.reference.task == target.task && row.reference.incarnation == target.incarnation
+            });
+            let Some(expected) = self.revision.clone().filter(|_| current) else {
+                self.view.cancel_receipts[index].disposition = CancelDisposition::Refused;
+                self.view.status = format!(
+                    "Cancellation stopped at child {} of {total}: exact task incarnation is no longer in the current bounded observation; later children were not sent.",
+                    index + 1
+                );
+                self.view.mutation_blocked = true;
+                return;
+            };
+            match self.request(Request {
+                version: 1,
+                command: Command::Cancel {
+                    expected,
+                    task: target,
+                },
+            }) {
+                Ok(Response {
+                    version: 1,
+                    outcome: Outcome::Applied {},
+                }) => {
+                    self.view.cancel_receipts[index].disposition = CancelDisposition::Applied;
+                    applied += 1;
+                    // The mutation response intentionally carries no speculative
+                    // next revision. Reobserve before authorizing the next child.
+                    self.page(None);
+                    if self.revision.is_none() || self.view.mutation_blocked {
+                        self.view.manual_refresh_required = true;
+                        self.view.status = format!(
+                            "Applied {applied} of {total} cancellations, then could not prove the next owner revision; later children were not sent. Refresh explicitly."
+                        );
+                        return;
+                    }
+                }
+                Ok(Response {
+                    outcome: Outcome::Refused { failure },
+                    ..
+                }) => {
+                    self.view.cancel_receipts[index].disposition = CancelDisposition::Refused;
+                    let status = format!(
+                        "{} Cancellation stopped; later children were not sent.",
+                        refusal(&failure)
+                    );
+                    self.invalidate(&status);
+                    return;
+                }
+                _ => {
+                    self.view.cancel_receipts[index].disposition =
+                        CancelDisposition::OutcomeUnknown;
+                    self.view.manual_refresh_required = true;
+                    self.invalidate(
+                        "Cancellation outcome unknown; later children were not sent. Inspect with Refresh; never automatically replay.",
+                    );
+                    return;
+                }
+            }
+        }
+        self.view.marked_cancel.clear();
+        self.view.status = format!(
+            "Applied {applied}/{total} independently receipted cancellations against current owner revisions."
+        );
+    }
+
     fn clear_plan(&mut self) {
         self.scheduling.pending = None;
         self.view.scheduling.pending = None;
@@ -197,6 +359,12 @@ impl<C: WireClientV1> Model<C> {
                         required_capability_count: entry.snapshot.required_capability_count,
                     })
                     .collect();
+                self.view.marked_cancel.retain(|marked| {
+                    self.view.rows.iter().any(|row| {
+                        row.reference.task == marked.task
+                            && row.reference.incarnation == marked.incarnation
+                    })
+                });
                 self.view.revision = match &revision {
                     Revision::Finite(value) => value.clone(),
                     Revision::Exhausted => "exhausted".into(),
@@ -310,6 +478,29 @@ impl<C: WireClientV1> Model<C> {
                     self.view.selected = index;
                 }
             }
+            Action::ToggleCancelSelection => {
+                self.clear_plan();
+                if let Some(row) = self.view.rows.get(self.view.selected) {
+                    let position = self.view.marked_cancel.iter().position(|marked| {
+                        marked.task == row.reference.task
+                            && marked.incarnation == row.reference.incarnation
+                    });
+                    if let Some(position) = position {
+                        self.view.marked_cancel.remove(position);
+                    } else if self.view.marked_cancel.len() < 64 {
+                        self.view.marked_cancel.push(row.reference.clone());
+                    }
+                    self.view.status = format!(
+                        "{} task{} marked for an independently receipted cancellation run.",
+                        self.view.marked_cancel.len(),
+                        if self.view.marked_cancel.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    );
+                }
+            }
             Action::DiscardPlan => {
                 self.clear_plan();
                 self.view.status = "Confirmation discarded; no command sent.".into();
@@ -323,47 +514,33 @@ impl<C: WireClientV1> Model<C> {
                     self.view.status = "Refresh before mutation.".into();
                     return;
                 }
-                if let (Some(revision), Some(row)) =
-                    (&self.revision, self.view.rows.get(self.view.selected))
+                if self.revision.is_some()
+                    && let Some(row) = self.view.rows.get(self.view.selected)
                 {
-                    self.pending = Some((revision.clone(), row.reference.clone()));
-                    self.view.pending_cancel = Some(display_id(&row.reference.task));
-                    self.view.status =
-                        "Confirm cancellation of this exact task incarnation and revision.".into();
+                    let targets = if self.view.marked_cancel.is_empty() {
+                        vec![row.reference.clone()]
+                    } else {
+                        self.view.marked_cancel.clone()
+                    };
+                    self.view.pending_cancel = Some(if targets.len() == 1 {
+                        display_id(&targets[0].task)
+                    } else {
+                        format!("{} marked tasks", targets.len())
+                    });
+                    self.pending = Some(targets);
+                    self.view.status = "Confirm the bounded cancellation run. Each child retains its exact incarnation and is reauthorized against the latest owner revision.".into();
                 }
             }
             Action::ConfirmCancel => {
-                if let Some((expected, task)) = self.pending.take() {
-                    self.mutate(Command::Cancel { expected, task });
+                if let Some(targets) = self.pending.take() {
+                    self.cancel_batch(targets);
                 }
             }
             Action::Submit(id) => {
-                self.clear_plan();
-                if !self.writes {
-                    self.view.status = "This client is read-only.".into();
-                    return;
-                }
-                if self.view.mutation_blocked {
-                    self.view.status = "Refresh before mutation.".into();
-                    return;
-                }
-                if id.is_empty() || id.len() > 256 {
-                    self.view.status = "Task ID must be 1–256 UTF-8 bytes.".into();
-                    return;
-                }
-                if let Some(expected) = self.revision.clone() {
-                    self.mutate(Command::SubmitGraph {
-                        expected,
-                        tasks: vec![TaskSpec {
-                            id,
-                            priority: 0,
-                            dependencies: vec![],
-                            capabilities: vec![],
-                            max_attempts: 3,
-                            retry_safety: RetrySafety::FenceUnknown,
-                        }],
-                    });
-                }
+                self.submit_batch(vec![id]);
+            }
+            Action::SubmitBatch(ids) => {
+                self.submit_batch(ids);
             }
         }
     }
