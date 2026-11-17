@@ -82,7 +82,6 @@ fn increment(value: &mut u64, saturated: &mut bool) {
     }
 }
 
-#[derive(Debug)]
 pub enum Action {
     RefreshScheduling(std::time::SystemTime),
     PlanScheduling(SchedulingChange),
@@ -99,6 +98,35 @@ pub enum Action {
     DiscardPlan,
     Submit(String),
     SubmitBatch(Vec<String>),
+    SubmitGraph(Vec<TaskSpec>),
+}
+
+impl std::fmt::Debug for Action {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (name, cardinality) = match self {
+            Self::RefreshScheduling(_) => ("RefreshScheduling", None),
+            Self::PlanScheduling(_) => ("PlanScheduling", None),
+            Self::ConfirmScheduling => ("ConfirmScheduling", None),
+            Self::Refresh => ("Refresh", None),
+            Self::RefreshKeepingSelection => ("RefreshKeepingSelection", None),
+            Self::NextPage => ("NextPage", None),
+            Self::Up => ("Up", None),
+            Self::Down => ("Down", None),
+            Self::Select(_) => ("Select", None),
+            Self::PlanCancel => ("PlanCancel", None),
+            Self::ToggleCancelSelection => ("ToggleCancelSelection", None),
+            Self::ConfirmCancel => ("ConfirmCancel", None),
+            Self::DiscardPlan => ("DiscardPlan", None),
+            Self::Submit(_) => ("Submit", Some(1)),
+            Self::SubmitBatch(ids) => ("SubmitBatch", Some(ids.len())),
+            Self::SubmitGraph(tasks) => ("SubmitGraph", Some(tasks.len())),
+        };
+        let mut debug = formatter.debug_struct(name);
+        if let Some(cardinality) = cardinality {
+            debug.field("cardinality", &cardinality);
+        }
+        debug.finish_non_exhaustive()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -180,6 +208,21 @@ impl<C: WireClientV1> Model<C> {
     }
 
     fn submit_batch(&mut self, ids: Vec<String>) {
+        self.submit_graph(
+            ids.into_iter()
+                .map(|id| TaskSpec {
+                    id,
+                    priority: 0,
+                    dependencies: vec![],
+                    capabilities: vec![],
+                    max_attempts: 3,
+                    retry_safety: RetrySafety::FenceUnknown,
+                })
+                .collect(),
+        );
+    }
+
+    fn submit_graph(&mut self, tasks: Vec<TaskSpec>) {
         self.clear_plan();
         if !self.writes {
             self.view.status = "This client is read-only.".into();
@@ -189,37 +232,31 @@ impl<C: WireClientV1> Model<C> {
             self.view.status = "Refresh before mutation.".into();
             return;
         }
-        if ids.is_empty() || ids.len() > MAX_SUBMIT_BATCH {
+        if tasks.is_empty() || tasks.len() > MAX_SUBMIT_BATCH {
             self.view.status = format!("Submit 1–{MAX_SUBMIT_BATCH} tasks per atomic graph.");
             return;
         }
-        if ids.iter().any(|id| id.is_empty() || id.len() > 256) {
+        if tasks
+            .iter()
+            .any(|task| task.id.is_empty() || task.id.len() > 256)
+        {
             self.view.status = "Each task ID must be 1–256 UTF-8 bytes.".into();
             return;
         }
-        let unique = ids
+        if tasks.iter().any(|task| task.max_attempts == 0) {
+            self.view.status = "Maximum attempts must be at least 1.".into();
+            return;
+        }
+        let unique = tasks
             .iter()
-            .map(String::as_str)
+            .map(|task| task.id.as_str())
             .collect::<std::collections::HashSet<_>>();
-        if unique.len() != ids.len() {
+        if unique.len() != tasks.len() {
             self.view.status = "Task IDs in an atomic graph must be unique.".into();
             return;
         }
         if let Some(expected) = self.revision.clone() {
-            self.mutate(Command::SubmitGraph {
-                expected,
-                tasks: ids
-                    .into_iter()
-                    .map(|id| TaskSpec {
-                        id,
-                        priority: 0,
-                        dependencies: vec![],
-                        capabilities: vec![],
-                        max_attempts: 3,
-                        retry_safety: RetrySafety::FenceUnknown,
-                    })
-                    .collect(),
-            });
+            self.mutate(Command::SubmitGraph { expected, tasks });
         }
     }
 
@@ -541,6 +578,9 @@ impl<C: WireClientV1> Model<C> {
             }
             Action::SubmitBatch(ids) => {
                 self.submit_batch(ids);
+            }
+            Action::SubmitGraph(tasks) => {
+                self.submit_graph(tasks);
             }
         }
     }
