@@ -2,10 +2,11 @@
   "repository": "https://github.com/gantbd/keystone",
   "package": "keystone-storage",
   "version": "0.0.1",
+  "local_version": "0.0.1-chronos.1",
   "base_commit": "8cdebfb3280037453e357d849b80c82ad0c4ef8d",
   "working_tree_changes_included": true,
   "source_lib_sha256": "50c29748029e6d178cd68dde97022480f91e81da757f1ee8454dd4e89f8920cd",
-  "manifest_sha256": "8c3b5c732115ff136485fef1f6558b79a8276691582244788392d51eb70e877e",
+  "manifest_sha256": "3be9e52108079602f1359efa5b8f70c057c62bf8b738e10302d59fe122d2fe81",
   "upstream_package_sha256": "85b8f00443e01b85e455da0f78f46dabb36a51d9995d80a949c2bd3dd78d18b1",
   "selected_mechanism": "CommitGate post-offer durable-receipt validation",
   "not_an_immutable_upstream_release": true

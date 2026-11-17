@@ -8,7 +8,7 @@
   "scope": "non-gui-core-workspace",
   "excludedProfiles": {
     "presentations": "separate repositories and gates",
-    "vellumCapture": "blocked on sibling Vellum dependency remediation"
+    "vellumCapture": "separately qualified cross-project profile"
   },
   "publishing": {
     "cratesIo": "none-authorized",

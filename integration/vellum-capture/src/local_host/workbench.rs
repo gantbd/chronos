@@ -38,7 +38,7 @@ where
     P: PublicationAuthorityV1,
     D: WorkbenchHandoffPolicy,
 {
-    workbench_tui::run_hosted_terminal(hub, move || {
+    pantheon::run_hosted_terminal(hub, move || {
         let (service, mut handoff, mut policy) = start()?;
         let handler = move |service: &mut Service, request: HandoffRequest| {
             dispatch(&mut handoff, &mut policy, service, request).unwrap_or_else(|failure| {
