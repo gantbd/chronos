@@ -7,7 +7,9 @@ mod driver;
 pub mod lifecycle;
 pub mod ownership;
 pub mod signals;
+mod trusted_worker;
 use ownership::WriterOwnership;
+pub use trusted_worker::{TrustedWorkerHandle, WorkerTransportErrorV1};
 
 use chronos_host::native::{OperationV1, RequestV1};
 use chronos_local::{IO_TIMEOUT, MAX_REQUEST_BYTES, MAX_RESPONSE_BYTES, socket_path};
@@ -121,6 +123,19 @@ impl chronos_service::observer::ObserverAuthorizer for OperatorPolicy {
         true
     }
 }
+impl chronos_service::worker::WorkerAuthorizer for OperatorPolicy {
+    fn allows_worker(&mut self, _: &chronos_host::worker::WorkerRequestV1) -> bool {
+        self.allow_writes
+    }
+
+    fn allows_worker_result(
+        &mut self,
+        _: &chronos_host::worker::WorkerRequestV1,
+        _: &chronos_engine::CommandOutcomeV2,
+    ) -> bool {
+        self.allow_writes
+    }
+}
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ServerOptions {
     pub allow_writes: bool,
@@ -156,6 +171,7 @@ pub struct Server {
     control_identity: (u64, u64),
     lifecycle: lifecycle::Lifecycle,
     signals: TransportSignals,
+    worker: Option<trusted_worker::WorkerInbox>,
 }
 
 /// Content-free interface measurements. No principal, task or path labels.
@@ -177,6 +193,10 @@ pub struct TransportSignals {
     pub control_time: std::time::Duration,
     pub drain_requests: u64,
     pub signal_requests: u64,
+    pub worker_requests: u64,
+    pub worker_refused: u64,
+    pub worker_delivery_failed: u64,
+    pub worker_time: std::time::Duration,
 }
 fn increment(value: &mut u64, saturated: &mut bool) {
     if let Some(next) = value.checked_add(1) {
@@ -249,7 +269,26 @@ impl Server {
             control_identity,
             lifecycle: lifecycle::Lifecycle::default(),
             signals: TransportSignals::default(),
+            worker: None,
         })
+    }
+
+    /// Installs the one trusted in-process worker route before the owner loop
+    /// starts. The route is available only for the durable atomic profile with
+    /// writes enabled; it is never projected onto either Unix socket.
+    pub fn trusted_worker(&mut self) -> Result<TrustedWorkerHandle, &'static str> {
+        if !self.lifecycle.ready() {
+            return Err("trusted worker requires a ready owner");
+        }
+        if self.worker.is_some() {
+            return Err("trusted worker already installed");
+        }
+        if !self.service.worker_available() {
+            return Err("trusted worker requires writable atomic state");
+        }
+        let (handle, inbox) = trusted_worker::channel().map_err(|_| "worker channel refused")?;
+        self.worker = Some(inbox);
+        Ok(handle)
     }
 
     pub fn signals(&self) -> TransportSignals {

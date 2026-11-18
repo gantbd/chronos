@@ -1,15 +1,62 @@
 use super::*;
 use chronos_wire::control::{CommandV1, LifecycleV1, MaintenanceV1, StatusV1};
 use rustix::event::{PollFd, PollFlags, poll};
-use std::{
-    io::{Read, Write},
-    os::fd::AsFd,
-};
+use std::io::{Read, Write};
 
 enum Event {
     Data,
     Control,
     Signal,
+    Worker,
+    WorkerClosed,
+}
+
+fn poll_ready(fds: &mut [PollFd<'_>]) -> Result<(), &'static str> {
+    loop {
+        match poll(fds, None) {
+            Ok(_) => return Ok(()),
+            Err(rustix::io::Errno::INTR) => continue,
+            Err(_) => return Err("service readiness wait failed"),
+        }
+    }
+}
+
+fn ready_event(
+    fds: &[PollFd<'_>],
+    signal: Option<usize>,
+    worker: Option<usize>,
+) -> Result<Event, &'static str> {
+    if fds
+        .iter()
+        .any(|fd| fd.revents().intersects(PollFlags::ERR | PollFlags::NVAL))
+    {
+        return Err("service descriptor failed");
+    }
+    if let Some(index) = signal {
+        if fds[index].revents().contains(PollFlags::IN) {
+            return Ok(Event::Signal);
+        }
+        if fds[index].revents().contains(PollFlags::HUP) {
+            return Err("signal channel lost");
+        }
+    }
+    // Operational control wins ties: no new data or worker request is admitted
+    // after an already observable drain request.
+    if fds[0].revents().contains(PollFlags::IN) {
+        return Ok(Event::Control);
+    }
+    if let Some(index) = worker {
+        if fds[index].revents().contains(PollFlags::IN) {
+            return Ok(Event::Worker);
+        }
+        if fds[index].revents().contains(PollFlags::HUP) {
+            return Ok(Event::WorkerClosed);
+        }
+    }
+    if fds[1].revents().contains(PollFlags::IN) {
+        return Ok(Event::Data);
+    }
+    Err("unexpected service readiness event")
 }
 
 impl Server {
@@ -58,6 +105,8 @@ impl Server {
                 match self.wait_event(wake)? {
                     Event::Data => self.serve_one()?,
                     Event::Control => self.serve_control()?,
+                    Event::Worker => self.serve_worker()?,
+                    Event::WorkerClosed => self.worker = None,
                     Event::Signal => {
                         let mut source = wake.ok_or("signal wake unavailable")?;
                         let mut token = [0; 1];
@@ -88,45 +137,111 @@ impl Server {
     }
 
     fn wait_event(&self, wake: Option<&UnixStream>) -> Result<Event, &'static str> {
-        // Without a signal descriptor the third slot aliases data and is ignored.
-        let third = wake
-            .map(AsFd::as_fd)
-            .unwrap_or_else(|| self.listener.as_fd());
-        let mut fds = [
-            PollFd::new(&self.control, PollFlags::IN),
-            PollFd::new(&self.listener, PollFlags::IN),
-            PollFd::from_borrowed_fd(third, PollFlags::IN),
-        ];
-        loop {
-            match poll(&mut fds, None) {
-                Ok(_) => break,
-                Err(rustix::io::Errno::INTR) => continue,
-                Err(_) => return Err("service readiness wait failed"),
+        match (wake, self.worker.as_ref()) {
+            (Some(signal), Some(worker)) => {
+                let mut fds = [
+                    PollFd::new(&self.control, PollFlags::IN),
+                    PollFd::new(&self.listener, PollFlags::IN),
+                    PollFd::new(signal, PollFlags::IN),
+                    PollFd::new(&worker.wake, PollFlags::IN),
+                ];
+                poll_ready(&mut fds)?;
+                ready_event(&fds, Some(2), Some(3))
+            }
+            (Some(signal), None) => {
+                let mut fds = [
+                    PollFd::new(&self.control, PollFlags::IN),
+                    PollFd::new(&self.listener, PollFlags::IN),
+                    PollFd::new(signal, PollFlags::IN),
+                ];
+                poll_ready(&mut fds)?;
+                ready_event(&fds, Some(2), None)
+            }
+            (None, Some(worker)) => {
+                let mut fds = [
+                    PollFd::new(&self.control, PollFlags::IN),
+                    PollFd::new(&self.listener, PollFlags::IN),
+                    PollFd::new(&worker.wake, PollFlags::IN),
+                ];
+                poll_ready(&mut fds)?;
+                ready_event(&fds, None, Some(2))
+            }
+            (None, None) => {
+                let mut fds = [
+                    PollFd::new(&self.control, PollFlags::IN),
+                    PollFd::new(&self.listener, PollFlags::IN),
+                ];
+                poll_ready(&mut fds)?;
+                ready_event(&fds, None, None)
             }
         }
-        if fds
-            .iter()
-            .any(|fd| fd.revents().intersects(PollFlags::ERR | PollFlags::NVAL))
-        {
-            return Err("service descriptor failed");
+    }
+
+    fn serve_worker(&mut self) -> Result<(), &'static str> {
+        self.verify_ownership()?;
+        if !self.lifecycle.ready() {
+            return Err("service not ready");
         }
-        if wake.is_some() {
-            if fds[2].revents().contains(PollFlags::IN) {
-                return Ok(Event::Signal);
-            }
-            if fds[2].revents().contains(PollFlags::HUP) {
-                return Err("signal channel lost");
-            }
+        let mut token = [0; 1];
+        let read = {
+            let inbox = self.worker.as_mut().ok_or("worker unavailable")?;
+            inbox
+                .wake
+                .read(&mut token)
+                .map_err(|_| "worker wake failed")?
+        };
+        if read == 0 {
+            self.worker = None;
+            return Ok(());
         }
-        // Operational control wins ties: no new data request is admitted after
-        // an already observable drain request.
-        if fds[0].revents().contains(PollFlags::IN) {
-            return Ok(Event::Control);
+        if token != [1] {
+            return Err("invalid worker wake");
         }
-        if fds[1].revents().contains(PollFlags::IN) {
-            return Ok(Event::Data);
+        let call = {
+            let inbox = self.worker.as_mut().ok_or("worker unavailable")?;
+            inbox
+                .requests
+                .try_recv()
+                .map_err(|_| "worker request missing")?
+        };
+        self.lifecycle
+            .admit()
+            .map_err(|_| "worker admission refused")?;
+        increment(
+            &mut self.signals.worker_requests,
+            &mut self.signals.saturated,
+        );
+        let started = std::time::Instant::now();
+        let outcome = self.service.dispatch_worker(call.request);
+        if outcome.as_ref().is_ok_and(|reply| reply.is_err()) {
+            increment(
+                &mut self.signals.worker_refused,
+                &mut self.signals.saturated,
+            );
         }
-        Err("unexpected service readiness event")
+        let owner_fenced = outcome.is_err();
+        let published = outcome.map_err(|_| trusted_worker::WorkerTransportErrorV1::OwnerFenced);
+        if call.reply.send(published).is_err() {
+            increment(
+                &mut self.signals.worker_delivery_failed,
+                &mut self.signals.saturated,
+            );
+        }
+        let mut result = if owner_fenced {
+            Err("persistence fenced; worker outcome unknown")
+        } else {
+            Ok(())
+        };
+        if self.lifecycle.finish().is_err() {
+            result = Err("worker obligation discharge failed");
+        }
+        add_time(
+            &mut self.signals.worker_time,
+            started.elapsed(),
+            &mut self.signals.saturated,
+        );
+        self.verify_ownership()?;
+        result
     }
 
     fn serve_control(&mut self) -> Result<(), &'static str> {

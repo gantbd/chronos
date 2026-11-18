@@ -65,6 +65,7 @@ pub(crate) struct Backend {
     inner: Kind,
     marker: Option<Marker>,
     scope: Option<(String, ObserverCursorV1)>,
+    worker_enabled: bool,
 }
 struct Marker {
     file: File,
@@ -260,6 +261,7 @@ impl Backend {
             inner,
             marker,
             scope: None,
+            worker_enabled: options.allow_writes && options.atomic_state,
         };
         if options.allocation_receipts {
             match &mut backend.inner {
@@ -318,6 +320,23 @@ impl Backend {
             Kind::Atomic(service) => service
                 .dispatch(request)
                 .map_err(|_| "persistence fenced; outcome unknown"),
+        }
+    }
+    pub(crate) fn worker_available(&self) -> bool {
+        self.worker_enabled && matches!(self.inner, Kind::Atomic(_))
+    }
+    pub(crate) fn dispatch_worker(
+        &mut self,
+        request: chronos_host::worker::WorkerRequestV1,
+    ) -> Result<chronos_host::worker::WorkerReplyV1, &'static str> {
+        if !self.worker_enabled {
+            return Err("trusted worker unavailable");
+        }
+        match &mut self.inner {
+            Kind::Atomic(service) => service
+                .dispatch_worker(request)
+                .map_err(|_| "persistence fenced; worker outcome unknown"),
+            Kind::Legacy(_) => Err("trusted worker unavailable"),
         }
     }
     pub(crate) fn dispatch_v2(&mut self, request: RequestV2) -> Result<ReplyV2, &'static str> {

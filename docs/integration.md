@@ -124,6 +124,23 @@ current state and use explicit expiry/reconciliation; never blindly redispatch.
 Recovery preserves attempt correlation but invalidates old grant/lease/time
 authority and fences in-flight effects as uncertain.
 
+The standalone atomic owner can install one non-cloneable
+`TrustedWorkerHandle` before its serial owner loop starts. A bounded native
+request channel carries `WorkerRequestV1`; a Unix-stream pair carries wakeup
+bytes only, so no grant, lease, request, or result is serialized. Coordination,
+operational control, shutdown, and worker calls share the same owner and durable
+envelope. Shutdown and control win readiness ties, clean handle EOF removes only
+the worker route, and content-free request/refusal/delivery/time telemetry is
+exported with the existing transport signals. Writable atomic state is required;
+legacy and read-only owners refuse installation.
+
+Focused real-owner tests prove that a task admitted through ordinary
+coordination becomes Running and Succeeded through that same owner. Dropping an
+idle handle preserves coordination, while restart after a committed claim
+invalidates native authority, projects the task as Uncertain, and refuses a
+second claim. This is the in-process composition seam for a Moira-owned adapter;
+it does not itself start Moira, Daimon, a provider, or a Pantheon action.
+
 Native grants and leases remain private to the trusted execution adapter;
 Daimon receives an authority-free `TaskAttemptRefV1` and separately authorized
 execution context. These APIs start no worker, access no ambient clock, execute
