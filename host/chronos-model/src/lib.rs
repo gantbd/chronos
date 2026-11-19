@@ -224,12 +224,16 @@ impl<C: WireClientV1> Model<C> {
 
     fn submit_graph(&mut self, tasks: Vec<TaskSpec>) {
         self.clear_plan();
+        // A graph submission starts a distinct operator mutation. Retaining
+        // receipts from an earlier cancellation here mislabels the current
+        // outcome in every presentation that renders this view.
+        self.view.cancel_receipts.clear();
         if !self.writes {
-            self.view.status = "This client is read-only.".into();
+            self.view.status = "Task graph submission not sent: this client is read-only.".into();
             return;
         }
         if self.view.mutation_blocked {
-            self.view.status = "Refresh before mutation.".into();
+            self.view.status = "Task graph submission not sent: refresh before mutation.".into();
             return;
         }
         if tasks.is_empty() || tasks.len() > MAX_SUBMIT_BATCH {
@@ -436,16 +440,19 @@ impl<C: WireClientV1> Model<C> {
                 // Reading after success is not a retry of the mutation. Preserve
                 // known success even if this separate observation fails.
                 self.page(None);
-                self.view.status = format!("Applied. {}", self.view.status);
+                self.view.status = format!("Task graph submission applied. {}", self.view.status);
             }
             Ok(Response {
                 outcome: Outcome::Refused { failure },
                 ..
-            }) => self.invalidate(refusal(&failure)),
+            }) => {
+                let status = format!("Task graph submission refused. {}", refusal(&failure));
+                self.invalidate(&status);
+            }
             _ => {
                 self.view.manual_refresh_required = true;
                 self.invalidate(
-                    "Mutation outcome unknown. Inspect with Refresh; never automatically replay.",
+                    "Task graph submission outcome unknown. Inspect with Refresh; never automatically replay.",
                 );
             }
         }
@@ -597,6 +604,17 @@ fn refusal(failure: &Failure) -> &'static str {
         Failure::Refused {
             code: FailureCode::Limit,
         } => "Profile limit refused. No mutation was admitted.",
+        Failure::Refused {
+            code: FailureCode::UnknownDependency,
+        } => {
+            "An exact dependency does not name a current task. Review dependency IDs; nothing was admitted."
+        }
+        Failure::Refused {
+            code: FailureCode::DuplicateTask,
+        } => "A task ID already exists or is duplicated. Review task IDs; nothing was admitted.",
+        Failure::Refused {
+            code: FailureCode::DependencyCycle,
+        } => "The proposed dependency graph contains a cycle. Nothing was admitted.",
         _ => "Domain refused. Refresh and inspect before another mutation.",
     }
 }

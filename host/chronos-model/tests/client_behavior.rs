@@ -3,6 +3,7 @@ use chronos_client::WireClientV1;
 use chronos_engine::{Engine, StateRevision, TaskSpecV2};
 use chronos_host::ClientV1;
 use chronos_model::{Action, DispatchError, MAX_SUBMIT_BATCH, Model, Worker};
+use chronos_protocol::{RetrySafety, TaskSpec};
 use chronos_service::{Authorizer, Limits, Service};
 use std::sync::{
     Arc, Mutex,
@@ -241,7 +242,40 @@ fn known_applied_mutation_stays_known_when_followup_read_fails() {
     );
     model.apply(Action::Refresh);
     model.apply(Action::Submit("c".into()));
-    assert!(model.view.status.starts_with("Applied."));
+    assert!(
+        model
+            .view
+            .status
+            .starts_with("Task graph submission applied.")
+    );
+    assert!(model.view.mutation_blocked);
+}
+
+#[test]
+fn graph_submission_replaces_stale_cancel_receipts_and_names_unknown_dependency() {
+    let mut model = Model::new(client(backend()), true);
+    model.apply(Action::Refresh);
+    model.apply(Action::PlanCancel);
+    model.apply(Action::ConfirmCancel);
+    assert_eq!(model.view.cancel_receipts.len(), 1);
+
+    model.apply(Action::SubmitGraph(vec![TaskSpec {
+        id: "dependent".into(),
+        priority: 0,
+        dependencies: vec!["missing".into()],
+        capabilities: vec![],
+        max_attempts: 1,
+        retry_safety: RetrySafety::FenceUnknown,
+    }]));
+
+    assert!(model.view.cancel_receipts.is_empty());
+    assert!(
+        model
+            .view
+            .status
+            .starts_with("Task graph submission refused.")
+    );
+    assert!(model.view.status.contains("exact dependency"));
     assert!(model.view.mutation_blocked);
 }
 
