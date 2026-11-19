@@ -120,20 +120,27 @@ currentness. `AlignmentRegisterV1::observe` requires an explicit host disclosure
 decision and revalidates both the retained proposal and current frontier before
 projecting it. The protocol has no control command.
 
-This is not yet a hosted alignment transport or Pantheon presentation. Focused
-tests cover exact currentness, stale frontiers, PM impersonation, contradictory
-next work, duplicate references, codec refusal, weak-receipt fencing, disclosure
-denial and real directory drop/reopen; strict Clippy qualifies both protocol and
-integration library surfaces.
+Pantheon and Chronos TUI now provide matching observation-only presentation
+routes. Focused tests cover exact currentness, stale frontiers, PM
+impersonation, contradictory next work, duplicate references, codec refusal,
+weak-receipt fencing, disclosure denial and real directory drop/reopen; strict
+Clippy qualifies both protocol and integration library surfaces.
 
 The transport seam now reuses Chronos's bounded newline framing and exact
 `NotSent`/`OutcomeUnknown` client classifications. A closed observe request binds
 the expected Chronos scope; the integration host re-reads the current frontier
 and disclosure policy for that scope before answering. The verified local client
 uses an independent `chronos.alignment.sock` in an owner-only directory, and the
-integration supplies a one-request Unix connection handler. Deployment still
-owns listener creation, endpoint identity, the accept loop, shutdown and restart;
-those lifecycle responsibilities and a real configured proposal remain open.
+integration supplies a one-request Unix connection handler. Its independent
+listener lifecycle now adds a persistent single-owner lock, safe attributable
+stale-socket recovery, exact endpoint-identity fencing, OS-readiness-driven
+accept/shutdown, clean identity-checked removal, and content-free saturation-
+aware signals. A real local test binds the endpoint, observes through the public
+verified client, drains, removes, restarts through simulated crash residue, and
+proves an old owner cannot delete a replacement endpoint. The composition root
+still owns signal installation. A packaged process and live frontier adapter
+that re-read exact Chronos, Vellum and evidence-owner state remain open; no
+static retained proposal may masquerade as that current frontier.
 
 ## Independent text handoff
 

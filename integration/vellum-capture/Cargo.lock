@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "aegis-admin-command"
+version = "0.1.0"
+dependencies = [
+ "aegis-client",
+ "aegis-protocol",
+]
+
+[[package]]
 name = "aegis-client"
 version = "0.1.0"
 dependencies = [
@@ -17,6 +25,7 @@ version = "0.1.0"
 name = "aegis-tui"
 version = "0.1.0"
 dependencies = [
+ "aegis-admin-command",
  "aegis-client",
  "aegis-protocol",
  "crossterm",
@@ -308,6 +317,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "daimon-agent-command"
+version = "0.1.0"
+dependencies = [
+ "daimon-client",
+ "daimon-protocol",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "daimon-client"
 version = "0.1.0"
 dependencies = [
@@ -318,12 +338,16 @@ dependencies = [
 [[package]]
 name = "daimon-protocol"
 version = "0.1.0"
+dependencies = [
+ "sha2",
+]
 
 [[package]]
 name = "daimon-tui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "daimon-agent-command",
  "daimon-client",
  "daimon-protocol",
  "ratatui",
@@ -502,6 +526,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "hermes-consumer-command"
+version = "0.1.0"
+dependencies = [
+ "hermes-client",
+ "hermes-protocol",
+]
+
+[[package]]
+name = "hermes-disclosure-command"
+version = "0.1.0"
+dependencies = [
+ "hermes-client",
+ "hermes-protocol",
+]
+
+[[package]]
+name = "hermes-operator-command"
+version = "0.1.0"
+dependencies = [
+ "hermes-client",
+ "hermes-protocol",
+]
+
+[[package]]
 name = "hermes-protocol"
 version = "0.1.0"
 
@@ -511,7 +559,35 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "hermes-client",
+ "hermes-consumer-command",
+ "hermes-disclosure-command",
+ "hermes-operator-command",
  "hermes-protocol",
+ "ratatui",
+]
+
+[[package]]
+name = "hestia-local-client"
+version = "0.1.0"
+dependencies = [
+ "hestia-protocol",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "hestia-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "hestia-tui"
+version = "0.1.0"
+dependencies = [
+ "hestia-local-client",
+ "hestia-protocol",
  "ratatui",
 ]
 
@@ -689,6 +765,7 @@ dependencies = [
  "moira-client",
  "moira-protocol",
  "ratatui",
+ "serde_json",
  "sha2",
 ]
 
@@ -766,6 +843,7 @@ dependencies = [
  "crossterm",
  "daimon-tui",
  "hermes-tui",
+ "hestia-tui",
  "moira-tui",
  "ratatui",
  "serde",

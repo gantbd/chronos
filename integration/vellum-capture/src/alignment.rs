@@ -1315,6 +1315,164 @@ mod tests {
         assert!(matches!(response.outcome, public::Outcome::Observed { .. }));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn local_listener_owns_recovers_serves_and_drains_the_alignment_endpoint() {
+        use chronos_client::AlignmentWireClientV1;
+        use std::{
+            io::Write,
+            os::unix::{
+                fs::{DirBuilderExt, PermissionsExt},
+                net::UnixStream,
+            },
+        };
+
+        // macOS Unix-domain paths are short; keep the disposable endpoint
+        // comfortably below the kernel limit instead of relying on TMPDIR.
+        let directory = std::path::PathBuf::from("/tmp").join(format!(
+            "cal-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let basis = alignment_basis("goal-v1", 66);
+        let register = AlignmentRegisterV1::create(
+            MemoryJournal::default(),
+            proposal(basis.clone()),
+            limits(),
+        )
+        .unwrap();
+        let host = host::AlignmentHostV1::new(
+            register,
+            Frontier {
+                basis,
+                unavailable: false,
+            },
+            Disclosure(true),
+            limits(),
+        );
+        let listener = local::AlignmentListenerV1::bind(&directory).unwrap();
+        assert!(directory.join("chronos.alignment.sock").exists());
+        assert!(local::AlignmentListenerV1::bind(&directory).is_err());
+        let (shutdown_read, mut shutdown_write) = UnixStream::pair().unwrap();
+        let protocol_limits = public::Limits {
+            max_field_bytes: limits().max_field_bytes,
+            max_evidence: limits().max_evidence,
+            max_next_tasks: limits().max_next_tasks,
+        };
+        let server = std::thread::spawn(move || {
+            let mut listener = listener;
+            let mut host = host;
+            listener
+                .run_with_shutdown(&mut host, &shutdown_read, 4096, 16 * 1024, protocol_limits)
+                .unwrap();
+            listener.signals()
+        });
+        let mut client =
+            chronos_local::alignment::AlignmentLocalClient::new(&directory, protocol_limits);
+        let response = client
+            .request_alignment_v1(public::Request {
+                version: 1,
+                command: public::Command::Observe {
+                    chronos_scope: "product-delivery".into(),
+                },
+            })
+            .unwrap();
+        assert!(matches!(response.outcome, public::Outcome::Observed { .. }));
+        shutdown_write.write_all(&[1]).unwrap();
+        let signals = server.join().unwrap();
+        assert_eq!(signals.accepted, 1);
+        assert_eq!(signals.delivery_failed, 0);
+        assert!(!signals.fenced);
+        assert!(!directory.join("chronos.alignment.sock").exists());
+
+        // A persistent lock makes a crash-stale socket attributable on the
+        // next ownership acquisition. Simulate that residue without a live
+        // lock holder, then prove restart replaces it safely.
+        let stale_path = directory.join("chronos.alignment.sock");
+        let stale = std::os::unix::net::UnixListener::bind(&stale_path).unwrap();
+        std::fs::set_permissions(&stale_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        drop(stale);
+        let restarted = local::AlignmentListenerV1::bind(&directory).unwrap();
+        drop(restarted);
+        std::fs::remove_file(directory.join("alignment-owner.lock")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_listener_fences_and_preserves_a_replaced_endpoint() {
+        use std::os::unix::{
+            fs::{DirBuilderExt, PermissionsExt},
+            net::UnixListener,
+        };
+
+        let directory = std::path::PathBuf::from("/tmp").join(format!(
+            "car-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let mut owner = local::AlignmentListenerV1::bind(&directory).unwrap();
+        let path = directory.join("chronos.alignment.sock");
+        let displaced = directory.join("displaced.sock");
+        std::fs::rename(&path, &displaced).unwrap();
+        let replacement = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let basis = alignment_basis("goal-v1", 66);
+        let register = AlignmentRegisterV1::create(
+            MemoryJournal::default(),
+            proposal(basis.clone()),
+            limits(),
+        )
+        .unwrap();
+        let mut host = host::AlignmentHostV1::new(
+            register,
+            Frontier {
+                basis,
+                unavailable: false,
+            },
+            Disclosure(true),
+            limits(),
+        );
+        assert_eq!(
+            owner
+                .serve_one(
+                    &mut host,
+                    4096,
+                    16 * 1024,
+                    public::Limits {
+                        max_field_bytes: limits().max_field_bytes,
+                        max_evidence: limits().max_evidence,
+                        max_next_tasks: limits().max_next_tasks,
+                    },
+                )
+                .expect_err("replacement must fence the old owner"),
+            "alignment endpoint ownership changed"
+        );
+        assert!(owner.signals().fenced);
+        drop(owner);
+        assert!(path.exists(), "old owner must not remove the replacement");
+
+        drop(replacement);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(displaced).unwrap();
+        std::fs::remove_file(directory.join("alignment-owner.lock")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
     #[test]
     fn directory_register_survives_drop_and_reopen() {
         let directory = std::env::temp_dir().join(format!(

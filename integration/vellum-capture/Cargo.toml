@@ -25,6 +25,7 @@ keystone-storage = { path = "../../third_party/keystone-storage-0.0.1", version 
 keystone-observe = { path = "../../../keystone/crates/keystone-observe", version = "=0.0.1" }
 chronos-adapter-checkpoint = { path = "../../adapters/checkpoint", version = "=0.1.0" }
 vellum-engine = { path = "../../../vellum/engine/vellum-engine", version = "=0.1.0" }
+rustix = { version = "=1.1.6", features = ["event", "fs", "process"] }
 
 [[bin]]
 name = "vellum-chronos-workbench"
@@ -38,7 +39,6 @@ chronos-tui = { path = "../../../chronos-tui", version = "=0.1.0", optional = tr
 pantheon = { path = "../../../pantheon", version = "=0.1.0", optional = true }
 vellum-protocol = { path = "../../../vellum/protocol/vellum-protocol", version = "=0.1.0" }
 vellum-service = { path = "../../../vellum/service/vellum-service", version = "=0.1.0" }
-rustix = { version = "=1.1.6", features = ["fs", "process"] }
 
 [target.'cfg(unix)'.dev-dependencies]
 chronos-local = { path = "../../transport/chronos-local", version = "=0.1.0" }
