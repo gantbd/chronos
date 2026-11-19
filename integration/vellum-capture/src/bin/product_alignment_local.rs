@@ -36,8 +36,11 @@ mod macos {
     use serde::Deserialize;
     use std::{
         fs,
+        io::{Read, Write},
         net::SocketAddr,
+        os::unix::net::UnixStream,
         path::{Path, PathBuf},
+        thread,
         time::Duration,
     };
 
@@ -106,6 +109,13 @@ mod macos {
 
     struct ExactScopeDisclosure(String);
 
+    #[derive(Clone, Copy, Eq, PartialEq)]
+    enum Mode {
+        Observe,
+        ServeOne,
+        Supervised,
+    }
+
     impl AlignmentDisclosureV1 for ExactScopeDisclosure {
         fn allows(&mut self, record: &AlignmentRecordV1, current: &AlignmentBasisV1) -> bool {
             record.proposal().basis().chronos_scope() == self.0 && current.chronos_scope() == self.0
@@ -115,16 +125,27 @@ mod macos {
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let mut args = std::env::args_os().skip(1);
         let first = args.next().ok_or("configuration path required")?;
-        let (observe, config_path) = if first == "--observe" {
-            (true, args.next().ok_or("configuration path required")?)
+        let (mode, config_path) = if first == "--observe" {
+            (
+                Mode::Observe,
+                args.next().ok_or("configuration path required")?,
+            )
+        } else if first == "--supervised" {
+            (
+                Mode::Supervised,
+                args.next().ok_or("configuration path required")?,
+            )
         } else {
-            (false, first)
+            (Mode::ServeOne, first)
         };
         if args.next().is_some() {
-            return Err("usage: chronos-product-alignment-local [--observe] CONFIG.json".into());
+            return Err(
+                "usage: chronos-product-alignment-local [--observe|--supervised] CONFIG.json"
+                    .into(),
+            );
         }
         let config = load(Path::new(&config_path))?;
-        if observe {
+        if mode == Mode::Observe {
             return observe_alignment(&config);
         }
         let timeout = Duration::from_millis(config.timeout_ms);
@@ -204,10 +225,44 @@ mod macos {
         )
         .map_err(|_| "alignment runtime binding refused")?;
         eprintln!("chronos-product-alignment-local ready");
-        runtime
-            .serve_one()
-            .map_err(|error| format!("alignment listener stopped: {error}"))?;
+        match mode {
+            Mode::Observe => unreachable!("observe mode returned before runtime construction"),
+            Mode::ServeOne => runtime
+                .serve_one()
+                .map_err(|error| format!("alignment listener stopped: {error}"))?,
+            Mode::Supervised => run_supervised(&mut runtime)?,
+        }
         Ok(())
+    }
+
+    fn run_supervised<J, D>(
+        runtime: &mut LocalProductAlignmentRuntimeV1<J, D>,
+    ) -> Result<(), Box<dyn std::error::Error>>
+    where
+        J: chronos_vellum_capture::alignment::AlignmentJournalV1,
+        D: AlignmentDisclosureV1,
+    {
+        let (wake_reader, mut wake_writer) = UnixStream::pair()?;
+        let input = thread::Builder::new()
+            .name("chronos-alignment-supervisor".into())
+            .spawn(move || -> Result<(), &'static str> {
+                let mut token = [0_u8; 1];
+                let read = std::io::stdin().read_exact(&mut token);
+                let valid = read.is_ok() && token == *b"x";
+                wake_writer
+                    .write_all(&[u8::from(valid)])
+                    .map_err(|_| "alignment shutdown relay unavailable")?;
+                valid
+                    .then_some(())
+                    .ok_or("invalid alignment shutdown token")
+            })?;
+        runtime
+            .run_with_shutdown(&wake_reader)
+            .map_err(|error| format!("alignment listener stopped: {error}"))?;
+        input
+            .join()
+            .map_err(|_| "alignment shutdown relay panicked")?
+            .map_err(|error| error.into())
     }
 
     fn observe_alignment(config: &ConfigV1) -> Result<(), Box<dyn std::error::Error>> {

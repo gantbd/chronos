@@ -216,6 +216,16 @@ principals, the full owner evidence frontier, a pending human gate and the PM's
 `EscalateHuman` recommendation. Recurring/coalesced PM activation, Agora
 challenge and separately authorized proposal application remain open.
 
+`--supervised CONFIG.json` keeps the same immutable proposal and read-only
+listener available for repeated independent observations. It accepts only the
+single byte `x` on its private supervisor input, relays that to the listener's
+typed drain channel, and exits only after ownership revalidation and clean
+endpoint removal. Invalid or lost supervision fences the listener. Pantheon's
+hosted-topology gate exercised the TUI refresh, two additional public reads and
+a finite headless run against the same process, then returned a distinct clean
+`chronos-alignment` lifecycle receipt. Supervision adds availability, not a
+timer, event subscription, proposal rewrite or task authority.
+
 Live document binding no longer requires a persisted process-local ID: the
 locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
