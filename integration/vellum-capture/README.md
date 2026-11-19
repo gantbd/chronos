@@ -157,9 +157,16 @@ the deliberation read with Moira status revisions and refuses concurrent owner
 change, reopen-required state, a contested/non-admitted ensemble, missing bound
 stakeholders, scope drift, or retained-cohort drift. It never infers a PM,
 advocate, or supervisor from persona lens, model, provider, or member order.
-Complete evidence-owner reading, including an owner-supported classification of
-which observed dissent remains unresolved, and the packaged production
-composition remain open. Live document binding no longer requires a persisted
+The concrete Moira deliberation-evidence reader brackets the exact deliberation
+and optional review with stable registry status reads. It projects a bounded
+owner-revision/admission/orthogonality frontier, consumes Moira's explicit
+source-report/digest unresolved-dissent projection, and discovers a human gate
+only while an exact request has no matching response. Concurrent owner change,
+reopen-required state, a mismatched review, scope/cohort drift and limit
+overflow all refuse. This remains a deliberation-owned fragment: it does not
+claim Tellus grounding applicability or a budget-policy owner.
+Scope-bound Tellus grounding evidence, a live budget-policy reader, and the
+packaged production composition remain open. Live document binding no longer requires a persisted
 process-local ID: the locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
 Its evidence token includes the live workspace identity, document identity and

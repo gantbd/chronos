@@ -520,6 +520,271 @@ where
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeliberationEvidenceFrontierV1 {
+    pub evidence_frontier: Vec<OwnerEvidenceRefV1>,
+    pub unresolved_dissent: Vec<OwnerEvidenceRefV1>,
+    pub pending_human_gates: Vec<OwnerEvidenceRefV1>,
+}
+
+pub trait DeliberationEvidenceFrontierSourceV1 {
+    type Error;
+
+    /// Return the complete bounded evidence, unresolved dissent and pending
+    /// human-gate references owned by one deliberation boundary. Grounding and
+    /// budget owners remain separate frontier sources.
+    fn current_deliberation_evidence(
+        &mut self,
+        chronos_scope: &str,
+        cohort: &AlignmentCohortV1,
+    ) -> Result<DeliberationEvidenceFrontierV1, Self::Error>;
+}
+
+#[derive(Debug)]
+pub enum MoiraDeliberationFrontierReadErrorV1<E> {
+    InvalidConfiguration,
+    Transport(E),
+    Refused,
+    Missing,
+    ReopenRequired,
+    InvalidResponse,
+    Unstable,
+    Limit,
+}
+
+/// Read-only Moira deliberation-evidence reader. A stable registry revision
+/// brackets the exact deliberation and review reads. Report dissent is consumed
+/// through Moira's public unresolved-dissent projection; finding dispositions
+/// are never interpreted as dissent settlement by this adapter.
+pub struct MoiraDeliberationFrontierSourceV1<P> {
+    client: moira_client::DeliberationReadOnlyClient<P>,
+    chronos_scope: String,
+    deliberation: moira_protocol::deliberation::DeliberationIdV1,
+    cohort: AlignmentCohortV1,
+    limits: AlignmentLimitsV1,
+}
+
+impl<P> MoiraDeliberationFrontierSourceV1<P>
+where
+    P: moira_client::DeliberationServicePort,
+{
+    pub fn new(
+        port: P,
+        chronos_scope: String,
+        deliberation: moira_protocol::deliberation::DeliberationIdV1,
+        cohort: AlignmentCohortV1,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, AlignmentErrorV1> {
+        super::validate_field(&chronos_scope, limits)?;
+        if limits.max_evidence == 0 {
+            return Err(AlignmentErrorV1::Limit);
+        }
+        Ok(Self {
+            client: moira_client::DeliberationReadOnlyClient::new(port),
+            chronos_scope,
+            deliberation,
+            cohort,
+            limits,
+        })
+    }
+
+    pub fn into_port(self) -> P {
+        self.client.into_port()
+    }
+
+    fn status(
+        &mut self,
+    ) -> Result<
+        moira_protocol::deliberation::StatusV1,
+        MoiraDeliberationFrontierReadErrorV1<P::Error>,
+    > {
+        use moira_protocol::deliberation::{OutcomeV1, ReplyV1};
+
+        match self
+            .client
+            .status()
+            .map_err(MoiraDeliberationFrontierReadErrorV1::Transport)?
+        {
+            ReplyV1::Accepted(OutcomeV1::Status(status)) => Ok(status),
+            ReplyV1::Refused(_) => Err(MoiraDeliberationFrontierReadErrorV1::Refused),
+            ReplyV1::Accepted(_) => Err(MoiraDeliberationFrontierReadErrorV1::InvalidResponse),
+        }
+    }
+
+    fn deliberation(
+        &mut self,
+    ) -> Result<
+        moira_protocol::deliberation::DeliberationViewV1,
+        MoiraDeliberationFrontierReadErrorV1<P::Error>,
+    > {
+        use moira_protocol::deliberation::{OutcomeV1, ReplyV1};
+
+        match self
+            .client
+            .deliberation(self.deliberation)
+            .map_err(MoiraDeliberationFrontierReadErrorV1::Transport)?
+        {
+            ReplyV1::Accepted(OutcomeV1::Deliberation(Some(view))) => Ok(*view),
+            ReplyV1::Accepted(OutcomeV1::Deliberation(None)) => {
+                Err(MoiraDeliberationFrontierReadErrorV1::Missing)
+            }
+            ReplyV1::Refused(_) => Err(MoiraDeliberationFrontierReadErrorV1::Refused),
+            ReplyV1::Accepted(_) => Err(MoiraDeliberationFrontierReadErrorV1::InvalidResponse),
+        }
+    }
+
+    fn review(
+        &mut self,
+    ) -> Result<
+        Option<moira_protocol::deliberation::ReviewViewV1>,
+        MoiraDeliberationFrontierReadErrorV1<P::Error>,
+    > {
+        use moira_protocol::deliberation::{OutcomeV1, ReplyV1};
+
+        match self
+            .client
+            .review(self.deliberation)
+            .map_err(MoiraDeliberationFrontierReadErrorV1::Transport)?
+        {
+            ReplyV1::Accepted(OutcomeV1::Review(view)) => Ok(view.map(|value| *value)),
+            ReplyV1::Refused(_) => Err(MoiraDeliberationFrontierReadErrorV1::Refused),
+            ReplyV1::Accepted(_) => Err(MoiraDeliberationFrontierReadErrorV1::InvalidResponse),
+        }
+    }
+
+    fn reference(
+        &self,
+        resource: String,
+        revision: String,
+    ) -> Result<OwnerEvidenceRefV1, MoiraDeliberationFrontierReadErrorV1<P::Error>> {
+        OwnerEvidenceRefV1::new("moira".into(), resource, revision, self.limits).map_err(|error| {
+            if error == AlignmentErrorV1::Limit {
+                MoiraDeliberationFrontierReadErrorV1::Limit
+            } else {
+                MoiraDeliberationFrontierReadErrorV1::InvalidResponse
+            }
+        })
+    }
+
+    fn bounded(
+        &self,
+        values: std::collections::BTreeSet<OwnerEvidenceRefV1>,
+    ) -> Result<Vec<OwnerEvidenceRefV1>, MoiraDeliberationFrontierReadErrorV1<P::Error>> {
+        if values.len() > self.limits.max_evidence {
+            Err(MoiraDeliberationFrontierReadErrorV1::Limit)
+        } else {
+            Ok(values.into_iter().collect())
+        }
+    }
+}
+
+impl<P> DeliberationEvidenceFrontierSourceV1 for MoiraDeliberationFrontierSourceV1<P>
+where
+    P: moira_client::DeliberationServicePort,
+{
+    type Error = MoiraDeliberationFrontierReadErrorV1<P::Error>;
+
+    fn current_deliberation_evidence(
+        &mut self,
+        chronos_scope: &str,
+        cohort: &AlignmentCohortV1,
+    ) -> Result<DeliberationEvidenceFrontierV1, Self::Error> {
+        if chronos_scope != self.chronos_scope || cohort != &self.cohort {
+            return Err(MoiraDeliberationFrontierReadErrorV1::InvalidConfiguration);
+        }
+        let before = self.status()?;
+        if before.needs_reopen {
+            return Err(MoiraDeliberationFrontierReadErrorV1::ReopenRequired);
+        }
+        let deliberation = self.deliberation()?;
+        let review = self.review()?;
+        let after = self.status()?;
+        if before != after {
+            return Err(MoiraDeliberationFrontierReadErrorV1::Unstable);
+        }
+        if deliberation.plan.id != self.deliberation
+            || review.as_ref().is_some_and(|value| {
+                value.deliberation != self.deliberation || value.reports != deliberation.reports
+            })
+        {
+            return Err(MoiraDeliberationFrontierReadErrorV1::InvalidResponse);
+        }
+
+        let mut evidence = std::collections::BTreeSet::new();
+        evidence.insert(self.reference(
+            format!("deliberation/{}", lower_hex(&self.deliberation.0)),
+            before.revision.to_string(),
+        )?);
+        for (resource, digest) in [
+            (
+                "admission/affected-population",
+                deliberation.plan.admission.affected_population_digest,
+            ),
+            (
+                "admission/stakeholder-map",
+                deliberation.plan.admission.stakeholder_map_digest,
+            ),
+            (
+                "admission/coverage-manifest",
+                deliberation.plan.admission.coverage_manifest_digest,
+            ),
+            (
+                "admission/equity-assessment",
+                deliberation.plan.admission.equity_assessment_digest,
+            ),
+            (
+                "orthogonality/query",
+                deliberation.plan.orthogonality.query_digest,
+            ),
+            (
+                "orthogonality/result",
+                deliberation.plan.orthogonality.result_digest,
+            ),
+        ] {
+            evidence.insert(self.reference(resource.into(), lower_hex(&digest))?);
+        }
+        let mut unresolved_dissent = std::collections::BTreeSet::new();
+        for dissent in deliberation.unresolved_dissent() {
+            unresolved_dissent.insert(self.reference(
+                format!("dissent/{}", lower_hex(&dissent.source_report.0)),
+                lower_hex(&dissent.dissent_digest),
+            )?);
+        }
+
+        let mut pending_human_gates = std::collections::BTreeSet::new();
+        match (
+            deliberation.human_gate_request,
+            deliberation.human_gate_response,
+        ) {
+            (Some(request), None) => {
+                pending_human_gates.insert(self.reference(
+                    format!("human-gate/{}", lower_hex(&request.id.0)),
+                    lower_hex(&request.material_revision_digest),
+                )?);
+            }
+            (Some(request), Some(response)) if response.request == request.id => {}
+            (None, None) => {}
+            _ => return Err(MoiraDeliberationFrontierReadErrorV1::InvalidResponse),
+        }
+
+        Ok(DeliberationEvidenceFrontierV1 {
+            evidence_frontier: self.bounded(evidence)?,
+            unresolved_dissent: self.bounded(unresolved_dissent)?,
+            pending_human_gates: self.bounded(pending_human_gates)?,
+        })
+    }
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut value = String::with_capacity(bytes.len().saturating_mul(2));
+    for byte in bytes {
+        value.push(char::from(HEX[usize::from(byte >> 4)]));
+        value.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    value
+}
+
 pub trait GoalFrontierSourceV1 {
     type Error;
 

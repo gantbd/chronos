@@ -1263,6 +1263,7 @@ mod tests {
     struct MoiraCohortPort {
         status_revisions: std::collections::VecDeque<u64>,
         view: moira_protocol::deliberation::DeliberationViewV1,
+        review: Option<moira_protocol::deliberation::ReviewViewV1>,
         commands: Vec<moira_protocol::deliberation::CommandV1>,
     }
 
@@ -1286,6 +1287,11 @@ mod tests {
                     if deliberation == self.view.plan.id =>
                 {
                     ReplyV1::Accepted(OutcomeV1::Deliberation(Some(Box::new(self.view.clone()))))
+                }
+                moira_protocol::deliberation::CommandV1::Review { deliberation }
+                    if deliberation == self.view.plan.id =>
+                {
+                    ReplyV1::Accepted(OutcomeV1::Review(self.review.clone().map(Box::new)))
                 }
                 _ => panic!("cohort reader issued an unexpected Moira command"),
             };
@@ -1388,6 +1394,7 @@ mod tests {
             MoiraCohortPort {
                 status_revisions: [7, 7].into(),
                 view: moira_cohort_view(),
+                review: None,
                 commands: Vec::new(),
             },
             moira_cohort_binding(),
@@ -1412,6 +1419,7 @@ mod tests {
             MoiraCohortPort {
                 status_revisions: [7, 8].into(),
                 view: moira_cohort_view(),
+                review: None,
                 commands: Vec::new(),
             },
             moira_cohort_binding(),
@@ -1427,6 +1435,7 @@ mod tests {
             MoiraCohortPort {
                 status_revisions: [7, 7].into(),
                 view: missing_view,
+                review: None,
                 commands: Vec::new(),
             },
             moira_cohort_binding(),
@@ -1443,6 +1452,7 @@ mod tests {
             MoiraCohortPort {
                 status_revisions: [7, 7].into(),
                 view: contested_view,
+                review: None,
                 commands: Vec::new(),
             },
             moira_cohort_binding(),
@@ -1450,6 +1460,77 @@ mod tests {
         assert!(matches!(
             contested.current_cohort("product-delivery", &retained),
             Err(frontier::MoiraCohortReadErrorV1::EnsembleNotAdmitted)
+        ));
+    }
+
+    #[test]
+    fn moira_deliberation_frontier_discovers_owner_dissent_and_pending_gates() {
+        use frontier::DeliberationEvidenceFrontierSourceV1;
+        use moira_protocol::deliberation as d;
+
+        let mut view = moira_cohort_view();
+        view.reports.push(d::MemberReportV1 {
+            id: d::ReportIdV1([31; 16]),
+            member: d::EnsembleMemberIdV1([1; 16]),
+            output_digest: [32; 32],
+            evidence_digests: vec![[33; 32]],
+            dissent_digests: vec![[34; 32]],
+        });
+        view.human_gate_request = Some(d::HumanGateRequestV1 {
+            id: d::HumanGateRequestIdV1([35; 16]),
+            reviewer: [36; 16],
+            finding_digest: [37; 32],
+            decision_digest: [38; 32],
+            material_revision_digest: [39; 32],
+            policy_digest: [40; 32],
+            decision_packet: d::HumanGateMaterialRefV1 {
+                owner_route: [41; 16],
+                artifact_route: [42; 16],
+                expected_revision: 3,
+                expected_sha256: [43; 32],
+            },
+            requested_at: 4,
+        });
+        let retained = alignment_basis("goal-v1", 67).cohort().clone();
+        let mut source = frontier::MoiraDeliberationFrontierSourceV1::new(
+            MoiraCohortPort {
+                status_revisions: [7, 7].into(),
+                view,
+                review: None,
+                commands: Vec::new(),
+            },
+            "product-delivery".into(),
+            d::DeliberationIdV1([9; 16]),
+            retained.clone(),
+            limits(),
+        )
+        .unwrap();
+
+        let observed = source
+            .current_deliberation_evidence("product-delivery", &retained)
+            .unwrap();
+        assert_eq!(observed.evidence_frontier.len(), 7);
+        assert_eq!(observed.unresolved_dissent.len(), 1);
+        assert_eq!(observed.unresolved_dissent[0].owner(), "moira");
+        assert_eq!(
+            observed.unresolved_dissent[0].resource(),
+            format!("dissent/{}", "1f".repeat(16))
+        );
+        assert_eq!(observed.unresolved_dissent[0].revision(), "22".repeat(32));
+        assert_eq!(observed.pending_human_gates.len(), 1);
+        assert_eq!(
+            observed.pending_human_gates[0].resource(),
+            format!("human-gate/{}", "23".repeat(16))
+        );
+        assert_eq!(observed.pending_human_gates[0].revision(), "27".repeat(32));
+        assert!(matches!(
+            source.into_port().commands.as_slice(),
+            [
+                d::CommandV1::Status,
+                d::CommandV1::Deliberation { .. },
+                d::CommandV1::Review { .. },
+                d::CommandV1::Status
+            ]
         ));
     }
 
