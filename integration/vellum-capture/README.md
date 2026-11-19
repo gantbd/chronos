@@ -299,6 +299,16 @@ evidence, conflict and gate laws. Consequently, a model-facing PM payload has
 no structural route for replacing a worker task, lease, contribution or
 evidence frontier; invented conflicts and gates still refuse.
 
+`plan_product_manager_run_v1` is the deterministic coalescing gate before PM
+model invocation. It compares only the complete stable alignment basis and both
+attributed worker frontiers with the last durable reconciliation. Exact equality
+returns `Unchanged` without extending freshness; no retained record or any owner-
+fact change returns `Reconcile`. PM-authored rationale and judgment cannot make
+an unchanged owner frontier look new. Source refusal or instability occurs
+before this comparison and remains an incomplete run. Cadence/event activation,
+durable multi-record sequencing and proposal publication are still composition-
+root responsibilities.
+
 Live document binding no longer requires a persisted process-local ID: the
 locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
