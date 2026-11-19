@@ -395,6 +395,70 @@ pub enum ProductManagerJudgmentV1 {
     EscalateHuman,
 }
 
+/// PM-authored interpretation only. Worker positions are deliberately absent;
+/// they enter reconciliation exclusively through a stable owner-source sample.
+#[derive(Clone, Eq, PartialEq)]
+pub struct ProductManagerDecisionV1 {
+    author: PrincipalRefV1,
+    rationale: SourceReferenceV1,
+    judgment: ProductManagerJudgmentV1,
+    conflicts: Vec<OwnerEvidenceRefV1>,
+    human_gate: Option<OwnerEvidenceRefV1>,
+}
+
+impl std::fmt::Debug for ProductManagerDecisionV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ProductManagerDecisionV1(<redacted>)")
+    }
+}
+
+impl ProductManagerDecisionV1 {
+    pub fn new(
+        author: PrincipalRefV1,
+        rationale: SourceReferenceV1,
+        judgment: ProductManagerJudgmentV1,
+        mut conflicts: Vec<OwnerEvidenceRefV1>,
+        human_gate: Option<OwnerEvidenceRefV1>,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, AlignmentErrorV1> {
+        super::validate_field(author.as_str(), limits)?;
+        super::validate_source(&rationale, limits)?;
+        super::canonicalize_evidence(&mut conflicts, limits)?;
+        if let Some(gate) = &human_gate {
+            super::validate_evidence(std::slice::from_ref(gate), limits)?;
+        }
+        Ok(Self {
+            author,
+            rationale,
+            judgment,
+            conflicts,
+            human_gate,
+        })
+    }
+}
+
+/// Joins PM judgment to stable owner-sampled worker facts. The PM decision has
+/// no field through which it can replace either position.
+pub fn compose_reconciliation_v1(
+    basis: AlignmentBasisV1,
+    workers: frontier::StableWorkerFrontiersV1,
+    decision: ProductManagerDecisionV1,
+    limits: AlignmentLimitsV1,
+) -> Result<DualFrontierReconciliationV1, AlignmentErrorV1> {
+    let (external, constrained) = workers.into_parts();
+    DualFrontierReconciliationV1::new(
+        basis,
+        external,
+        constrained,
+        decision.author,
+        decision.rationale,
+        decision.judgment,
+        decision.conflicts,
+        decision.human_gate,
+        limits,
+    )
+}
+
 /// A PM-authored, authority-free reconciliation bound to the same exact owner
 /// frontier as the product-alignment proposal. Rich rationale remains in
 /// Vellum; Agora challenge and every owner mutation remain separate effects.
@@ -860,6 +924,58 @@ mod tests {
                 FrontierKindV1::PantheonConstrainedWorker,
                 String::from("insider")
             )));
+    }
+
+    #[test]
+    fn pm_decision_composes_only_with_stable_owner_worker_facts() {
+        let basis = alignment_basis("goal-v1", 66);
+        let external = worker(FrontierKindV1::ExternalSupervisor, "frontier-supervisor");
+        let constrained = worker(FrontierKindV1::PantheonConstrainedWorker, "insider");
+        let mut sampler = frontier::StableWorkerFrontierSamplerV1::new(
+            &basis,
+            principal("insider"),
+            WorkerSource::stable(external.clone()),
+            WorkerSource::stable(constrained.clone()),
+            limits(),
+        )
+        .unwrap();
+        let decision = ProductManagerDecisionV1::new(
+            principal("product-manager"),
+            source("pm-reconciliation-v2"),
+            ProductManagerJudgmentV1::EscalateHuman,
+            vec![basis.unresolved_dissent()[0].clone()],
+            Some(basis.pending_human_gates()[0].clone()),
+            limits(),
+        )
+        .unwrap();
+        let reconciliation =
+            compose_reconciliation_v1(basis.clone(), sampler.sample().unwrap(), decision, limits())
+                .unwrap();
+        assert_eq!(reconciliation.external(), &external);
+        assert_eq!(reconciliation.constrained(), &constrained);
+        assert_eq!(reconciliation.author().as_str(), "product-manager");
+
+        let invented = ProductManagerDecisionV1::new(
+            principal("product-manager"),
+            source("pm-reconciliation-v3"),
+            ProductManagerJudgmentV1::BoundaryRequired,
+            vec![reference("invented/conflict")],
+            None,
+            limits(),
+        )
+        .unwrap();
+        let mut sampler = frontier::StableWorkerFrontierSamplerV1::new(
+            &basis,
+            principal("insider"),
+            WorkerSource::stable(external),
+            WorkerSource::stable(constrained),
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(
+            compose_reconciliation_v1(basis, sampler.sample().unwrap(), invented, limits()),
+            Err(AlignmentErrorV1::Invalid)
+        );
     }
 
     #[test]

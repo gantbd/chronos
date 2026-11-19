@@ -95,6 +95,10 @@ impl StableWorkerFrontiersV1 {
     pub fn constrained(&self) -> &WorkerFrontierV1 {
         &self.constrained
     }
+
+    pub fn into_parts(self) -> (WorkerFrontierV1, WorkerFrontierV1) {
+        (self.external, self.constrained)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]

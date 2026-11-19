@@ -291,6 +291,14 @@ current local participant identity is a same-OS-user claim, not Aegis-
 authenticated identity, so this qualifies local dogfood composition rather
 than the future distributed trust boundary.
 
+PM interpretation is now a separate domain input with no worker-position
+fields. It may supply only the attributed PM principal, Vellum rationale,
+judgment, cited conflicts and an existing human-gate reference. Composition
+joins that decision to the stable owner-sampled pair and reruns the same role,
+evidence, conflict and gate laws. Consequently, a model-facing PM payload has
+no structural route for replacing a worker task, lease, contribution or
+evidence frontier; invented conflicts and gates still refuse.
+
 Live document binding no longer requires a persisted process-local ID: the
 locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
