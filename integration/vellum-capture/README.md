@@ -113,10 +113,18 @@ existing Chronos checkpoint mechanism; volatile or indeterminate commits fence
 publication. A new proposal uses a new exclusively owned register—there is no
 replace/update method that could rewrite the original basis.
 
-This is not yet a hosted alignment service or Pantheon presentation. Focused
+The owner-neutral `chronos-protocol::alignment_v1` observation carries the
+exact content-free goal/proposal versions, Chronos control-task observation,
+three-party cohort, budget/evidence/dissent/gate references, recommendation and
+currentness. `AlignmentRegisterV1::observe` requires an explicit host disclosure
+decision and revalidates both the retained proposal and current frontier before
+projecting it. The protocol has no control command.
+
+This is not yet a hosted alignment transport or Pantheon presentation. Focused
 tests cover exact currentness, stale frontiers, PM impersonation, contradictory
-next work, duplicate references, codec refusal, weak-receipt fencing and real
-directory drop/reopen; strict Clippy qualifies the library surface.
+next work, duplicate references, codec refusal, weak-receipt fencing, disclosure
+denial and real directory drop/reopen; strict Clippy qualifies both protocol and
+integration library surfaces.
 
 ## Independent text handoff
 

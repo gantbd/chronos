@@ -5,6 +5,7 @@
 //! proposal, accept work, grant authority, or satisfy a human gate.
 
 use crate::SourceReferenceV1;
+use chronos_protocol::alignment_v1 as public;
 use chronos_sdk_embedded::engine::{RevisionedTaskSnapshotV1, StateRevision, TaskPhase, TaskRefV1};
 use keystone_storage::{CommitGate, CommitOutcome, Revision};
 use vellum_host::annotation::Target;
@@ -406,7 +407,7 @@ pub trait AlignmentJournalV1 {
     type Error;
 
     fn load(&mut self, limits: AlignmentLimitsV1)
-        -> Result<Option<AlignmentRecordV1>, Self::Error>;
+    -> Result<Option<AlignmentRecordV1>, Self::Error>;
 
     fn commit(
         &mut self,
@@ -428,6 +429,18 @@ pub enum AlignmentRegisterErrorV1 {
 pub struct AlignmentRegisterV1<J> {
     journal: J,
     record: AlignmentRecordV1,
+}
+
+/// Host-owned disclosure decision for one exact immutable proposal and the
+/// current comparison frontier. It grants observation only.
+pub trait AlignmentDisclosureV1 {
+    fn allows(&mut self, record: &AlignmentRecordV1, current: &AlignmentBasisV1) -> bool;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AlignmentObservationErrorV1 {
+    Unauthorized,
+    Invalid,
 }
 
 impl<J: AlignmentJournalV1> AlignmentRegisterV1<J> {
@@ -476,6 +489,72 @@ impl<J: AlignmentJournalV1> AlignmentRegisterV1<J> {
         self.record.proposal.currentness(current)
     }
 
+    pub fn observe(
+        &self,
+        current: &AlignmentBasisV1,
+        limits: AlignmentLimitsV1,
+        disclosure: &mut impl AlignmentDisclosureV1,
+    ) -> Result<public::Observation, AlignmentObservationErrorV1> {
+        revalidate_proposal(&self.record.proposal, limits)
+            .map_err(|_| AlignmentObservationErrorV1::Invalid)?;
+        revalidate_basis(current, limits).map_err(|_| AlignmentObservationErrorV1::Invalid)?;
+        if !disclosure.allows(&self.record, current) {
+            return Err(AlignmentObservationErrorV1::Unauthorized);
+        }
+        let proposal = &self.record.proposal;
+        let basis = &proposal.basis;
+        let observation = public::Observation {
+            version: 1,
+            record_revision: self.record.revision.to_string(),
+            chronos_scope: basis.chronos_scope.clone(),
+            goal: project_source(&basis.goal),
+            control_task: project_control_task(&basis.control_task),
+            cohort: public::Cohort {
+                external_advocate: basis.cohort.external_advocate.as_str().to_owned(),
+                product_manager: basis.cohort.product_manager.as_str().to_owned(),
+                frontier_supervisor: basis.cohort.frontier_supervisor.as_str().to_owned(),
+            },
+            budget_policy: project_evidence(&basis.budget_policy),
+            evidence_frontier: basis
+                .evidence_frontier
+                .iter()
+                .map(project_evidence)
+                .collect(),
+            unresolved_dissent: basis
+                .unresolved_dissent
+                .iter()
+                .map(project_evidence)
+                .collect(),
+            pending_human_gates: basis
+                .pending_human_gates
+                .iter()
+                .map(project_evidence)
+                .collect(),
+            proposal: project_source(&proposal.proposal),
+            author: proposal.author.as_str().to_owned(),
+            recommendation: project_recommendation(proposal.recommendation),
+            recommended_next: proposal
+                .recommended_next
+                .iter()
+                .map(project_task_ref)
+                .collect(),
+            acceptance_evidence: proposal
+                .acceptance_evidence
+                .iter()
+                .map(project_evidence)
+                .collect(),
+            currentness: project_currentness(proposal.currentness(current)),
+        };
+        observation
+            .validate(public::Limits {
+                max_field_bytes: limits.max_field_bytes,
+                max_evidence: limits.max_evidence,
+                max_next_tasks: limits.max_next_tasks,
+            })
+            .map_err(|_| AlignmentObservationErrorV1::Invalid)?;
+        Ok(observation)
+    }
+
     pub fn into_journal(self) -> J {
         self.journal
     }
@@ -508,18 +587,7 @@ fn revalidate_proposal(
     limits: AlignmentLimitsV1,
 ) -> Result<(), AlignmentRegisterErrorV1> {
     let basis = &proposal.basis;
-    let rebuilt_basis = AlignmentBasisV1::new(
-        basis.goal.clone(),
-        basis.chronos_scope.clone(),
-        basis.control_task.clone(),
-        basis.cohort.clone(),
-        basis.budget_policy.clone(),
-        basis.evidence_frontier.clone(),
-        basis.unresolved_dissent.clone(),
-        basis.pending_human_gates.clone(),
-        limits,
-    )
-    .map_err(map_alignment_error)?;
+    let rebuilt_basis = revalidate_basis(basis, limits)?;
     let rebuilt = GroomingProposalV1::new(
         rebuilt_basis,
         proposal.proposal.clone(),
@@ -534,6 +602,124 @@ fn revalidate_proposal(
         return Err(AlignmentRegisterErrorV1::Invalid);
     }
     Ok(())
+}
+
+fn revalidate_basis(
+    basis: &AlignmentBasisV1,
+    limits: AlignmentLimitsV1,
+) -> Result<AlignmentBasisV1, AlignmentRegisterErrorV1> {
+    let rebuilt = AlignmentBasisV1::new(
+        basis.goal.clone(),
+        basis.chronos_scope.clone(),
+        basis.control_task.clone(),
+        basis.cohort.clone(),
+        basis.budget_policy.clone(),
+        basis.evidence_frontier.clone(),
+        basis.unresolved_dissent.clone(),
+        basis.pending_human_gates.clone(),
+        limits,
+    )
+    .map_err(map_alignment_error)?;
+    if &rebuilt != basis {
+        return Err(AlignmentRegisterErrorV1::Invalid);
+    }
+    Ok(rebuilt)
+}
+
+fn project_task_ref(task: &TaskRefV1) -> chronos_protocol::Reference {
+    chronos_protocol::Reference {
+        task: task.task_id().as_str().to_owned(),
+        incarnation: task.incarnation().get().to_string(),
+    }
+}
+
+fn project_control_task(task: &RevisionedTaskSnapshotV1) -> public::ControlTaskObservation {
+    public::ControlTaskObservation {
+        reference: project_task_ref(&task.reference),
+        revision: match task.revision {
+            StateRevision::Finite(value) => chronos_protocol::Revision::Finite(value.to_string()),
+            StateRevision::Exhausted => chronos_protocol::Revision::Exhausted,
+        },
+        snapshot: chronos_protocol::Snapshot {
+            phase: match task.task.phase {
+                TaskPhase::Blocked => chronos_protocol::Phase::Blocked,
+                TaskPhase::Ready => chronos_protocol::Phase::Ready,
+                TaskPhase::Running => chronos_protocol::Phase::Running,
+                TaskPhase::Uncertain => chronos_protocol::Phase::Uncertain,
+                TaskPhase::Succeeded => chronos_protocol::Phase::Succeeded,
+                TaskPhase::Failed => chronos_protocol::Phase::Failed,
+                TaskPhase::Cancelled => chronos_protocol::Phase::Cancelled,
+            },
+            attempt_number: task.task.attempt_number,
+            dependency_count: task.task.dependency_count,
+            required_capability_count: task.task.required_capability_count,
+            priority: task.task.priority,
+            max_attempts: task.task.max_attempts,
+        },
+    }
+}
+
+fn project_source(source: &SourceReferenceV1) -> public::SourceReference {
+    use vellum_host::annotation::{PointAffinity, PointMeaning};
+    let evidence = source.target.source();
+    public::SourceReference {
+        namespace: source.document.namespace.clone(),
+        document: source.document.value.clone(),
+        evidence_domain: evidence.domain.clone(),
+        evidence_revision: evidence.token.clone(),
+        byte_length: evidence.byte_length.to_string(),
+        target: match &source.target {
+            Target::Document { .. } => public::SourceTarget::Document,
+            Target::Point {
+                offset,
+                affinity,
+                profile,
+                ..
+            } => public::SourceTarget::Point {
+                offset: offset.to_string(),
+                affinity: match affinity {
+                    PointAffinity::Before => public::PointAffinity::Before,
+                    PointAffinity::After => public::PointAffinity::After,
+                },
+                meaning: match profile {
+                    PointMeaning::Position => public::PointMeaning::Position,
+                    PointMeaning::Content => public::PointMeaning::Content,
+                },
+            },
+            Target::Range { start, end, .. } => public::SourceTarget::Range {
+                start: start.to_string(),
+                end: end.to_string(),
+            },
+        },
+    }
+}
+
+fn project_evidence(value: &OwnerEvidenceRefV1) -> public::OwnerEvidenceReference {
+    public::OwnerEvidenceReference {
+        owner: value.owner.clone(),
+        resource: value.resource.clone(),
+        revision: value.revision.clone(),
+    }
+}
+
+const fn project_recommendation(value: GroomingRecommendationV1) -> public::Recommendation {
+    match value {
+        GroomingRecommendationV1::Continue => public::Recommendation::Continue,
+        GroomingRecommendationV1::Reorder => public::Recommendation::Reorder,
+        GroomingRecommendationV1::ReviseGoal => public::Recommendation::ReviseGoal,
+        GroomingRecommendationV1::EscalateHuman => public::Recommendation::EscalateHuman,
+        GroomingRecommendationV1::Stop => public::Recommendation::Stop,
+    }
+}
+
+const fn project_currentness(value: ProposalCurrentnessV1) -> public::Currentness {
+    match value {
+        ProposalCurrentnessV1::Current => public::Currentness::Current,
+        ProposalCurrentnessV1::GoalChanged => public::Currentness::GoalChanged,
+        ProposalCurrentnessV1::WorkChanged => public::Currentness::WorkChanged,
+        ProposalCurrentnessV1::CohortChanged => public::Currentness::CohortChanged,
+        ProposalCurrentnessV1::EvidenceChanged => public::Currentness::EvidenceChanged,
+    }
 }
 
 fn map_alignment_error(error: AlignmentErrorV1) -> AlignmentRegisterErrorV1 {
@@ -695,6 +881,14 @@ mod tests {
                     },
                 }))
             }
+        }
+    }
+
+    struct Disclosure(bool);
+
+    impl AlignmentDisclosureV1 for Disclosure {
+        fn allows(&mut self, _: &AlignmentRecordV1, _: &AlignmentBasisV1) -> bool {
+            self.0
         }
     }
 
@@ -955,6 +1149,42 @@ mod tests {
                 Err(AlignmentRegisterErrorV1::Storage)
             );
         }
+    }
+
+    #[test]
+    fn public_observation_requires_disclosure_and_preserves_currentness() {
+        let basis = alignment_basis("goal-v1", 66);
+        let register = AlignmentRegisterV1::create(
+            MemoryJournal::default(),
+            proposal(basis.clone()),
+            limits(),
+        )
+        .unwrap();
+        assert!(matches!(
+            register.observe(&basis, limits(), &mut Disclosure(false)),
+            Err(AlignmentObservationErrorV1::Unauthorized)
+        ));
+
+        let observation = register
+            .observe(&basis, limits(), &mut Disclosure(true))
+            .unwrap();
+        assert_eq!(observation.version, 1);
+        assert_eq!(observation.chronos_scope, "product-delivery");
+        assert_eq!(observation.control_task.reference.task, "pm-control");
+        assert_eq!(observation.recommended_next[0].task, "next-slice");
+        assert!(matches!(
+            observation.currentness,
+            public::Currentness::Current
+        ));
+
+        let changed = alignment_basis("goal-v2", 66);
+        let observation = register
+            .observe(&changed, limits(), &mut Disclosure(true))
+            .unwrap();
+        assert!(matches!(
+            observation.currentness,
+            public::Currentness::GoalChanged
+        ));
     }
 
     #[test]

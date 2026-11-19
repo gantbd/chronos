@@ -4,6 +4,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod alignment_v1;
 pub mod control;
 pub mod coordination_v2;
 pub mod coordination_v3;

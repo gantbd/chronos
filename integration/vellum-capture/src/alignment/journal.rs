@@ -2,11 +2,11 @@
 //! checkpoint adapter. The directory is exclusively owned by the integration
 //! host and must never be the Chronos service directory.
 
-use super::{codec, validate_limits, AlignmentJournalV1, AlignmentLimitsV1, AlignmentRecordV1};
+use super::{AlignmentJournalV1, AlignmentLimitsV1, AlignmentRecordV1, codec, validate_limits};
 use chronos_adapter_checkpoint::DirectoryServiceEnvelopeStore;
 use chronos_sdk_embedded::{
     engine::AcknowledgementStrength,
-    host::{service_envelope::ServiceEnvelopeStore, StoreError},
+    host::{StoreError, service_envelope::ServiceEnvelopeStore},
 };
 use keystone_storage::{
     AcknowledgementStrength as Strength, CommitOutcome, CommitReceipt, Revision,
