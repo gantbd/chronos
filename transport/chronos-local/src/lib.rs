@@ -15,6 +15,7 @@ use std::{
     time::Duration,
 };
 
+pub mod alignment;
 pub mod control;
 mod dependencies;
 mod scheduling;
@@ -64,6 +65,14 @@ pub fn control_path(directory: &Path) -> PathBuf {
 }
 pub fn verify_control_socket(directory: &Path) -> io::Result<PathBuf> {
     verify_named_socket(directory, "chronos.control.sock")
+}
+
+pub fn alignment_socket_path(directory: &Path) -> PathBuf {
+    directory.join("chronos.alignment.sock")
+}
+
+pub fn verify_alignment_socket(directory: &Path) -> io::Result<PathBuf> {
+    verify_named_socket(directory, "chronos.alignment.sock")
 }
 
 fn verify_named_socket(directory: &Path, name: &str) -> io::Result<PathBuf> {

@@ -17,6 +17,7 @@ workbench = ["dep:chronos-tui", "dep:pantheon", "dep:chronos-local", "dep:vellum
 [dependencies]
 chronos-client = { path = "../../client/chronos-client", version = "=0.1.0" }
 chronos-protocol = { path = "../../protocol/chronos-protocol", version = "=0.1.0" }
+chronos-wire = { path = "../../protocol/chronos-wire", version = "=0.1.0" }
 chronos-sdk-embedded = { path = "../../sdk/embedded", version = "=0.1.0" }
 vellum-workspace = { path = "../../../vellum/host/vellum-workspace", version = "=0.1.0" }
 vellum-host = { path = "../../../vellum/host/vellum-host", version = "=0.1.0" }

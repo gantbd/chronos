@@ -11,7 +11,10 @@ use keystone_storage::{CommitGate, CommitOutcome, Revision};
 use vellum_host::annotation::Target;
 
 mod codec;
+pub mod host;
 pub mod journal;
+#[cfg(unix)]
+pub mod local;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AlignmentLimitsV1 {
@@ -892,6 +895,23 @@ mod tests {
         }
     }
 
+    struct Frontier {
+        basis: AlignmentBasisV1,
+        unavailable: bool,
+    }
+
+    impl host::AlignmentFrontierV1 for Frontier {
+        type Error = ();
+
+        fn current(&mut self, scope: &str) -> Result<AlignmentBasisV1, Self::Error> {
+            if self.unavailable || scope != self.basis.chronos_scope() {
+                Err(())
+            } else {
+                Ok(self.basis.clone())
+            }
+        }
+    }
+
     pub(super) fn limits() -> AlignmentLimitsV1 {
         AlignmentLimitsV1 {
             max_field_bytes: 64,
@@ -1185,6 +1205,114 @@ mod tests {
             observation.currentness,
             public::Currentness::GoalChanged
         ));
+    }
+
+    #[test]
+    fn host_observes_only_the_owned_scope_and_current_frontier() {
+        let basis = alignment_basis("goal-v1", 66);
+        let register = AlignmentRegisterV1::create(
+            MemoryJournal::default(),
+            proposal(basis.clone()),
+            limits(),
+        )
+        .unwrap();
+        let mut host = host::AlignmentHostV1::new(
+            register,
+            Frontier {
+                basis,
+                unavailable: false,
+            },
+            Disclosure(true),
+            limits(),
+        );
+        let observe = |scope: &str| public::Request {
+            version: 1,
+            command: public::Command::Observe {
+                chronos_scope: scope.into(),
+            },
+        };
+        assert!(matches!(
+            host.dispatch(observe("product-delivery")).outcome,
+            public::Outcome::Observed { .. }
+        ));
+        assert!(matches!(
+            host.dispatch(observe("different-owner")).outcome,
+            public::Outcome::Refused {
+                code: public::RefusalCode::Unauthorized
+            }
+        ));
+        let (register, mut frontier, disclosure) = host.into_parts();
+        frontier.unavailable = true;
+        let mut host = host::AlignmentHostV1::new(register, frontier, disclosure, limits());
+        assert!(matches!(
+            host.dispatch(observe("product-delivery")).outcome,
+            public::Outcome::Refused {
+                code: public::RefusalCode::Unavailable
+            }
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_host_serves_one_bounded_read_only_frame() {
+        use std::{
+            io::{BufReader, Write},
+            os::unix::net::UnixStream,
+        };
+
+        let basis = alignment_basis("goal-v1", 66);
+        let register = AlignmentRegisterV1::create(
+            MemoryJournal::default(),
+            proposal(basis.clone()),
+            limits(),
+        )
+        .unwrap();
+        let mut host = host::AlignmentHostV1::new(
+            register,
+            Frontier {
+                basis,
+                unavailable: false,
+            },
+            Disclosure(true),
+            limits(),
+        );
+        let request = public::Request {
+            version: 1,
+            command: public::Command::Observe {
+                chronos_scope: "product-delivery".into(),
+            },
+        };
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let sent = chronos_wire::encode(&request, 4096).unwrap();
+        client.write_all(&sent).unwrap();
+        client.write_all(b"\n").unwrap();
+        local::serve_connection(
+            &mut host,
+            server,
+            4096,
+            16 * 1024,
+            public::Limits {
+                max_field_bytes: limits().max_field_bytes,
+                max_evidence: limits().max_evidence,
+                max_next_tasks: limits().max_next_tasks,
+            },
+        )
+        .unwrap();
+        let frame = chronos_wire::read_frame(&mut BufReader::new(client), 16 * 1024)
+            .unwrap()
+            .unwrap();
+        let response = chronos_wire::decode_alignment_response_v1(
+            &frame,
+            16 * 1024,
+            &request,
+            public::Limits {
+                max_field_bytes: limits().max_field_bytes,
+                max_evidence: limits().max_evidence,
+                max_next_tasks: limits().max_next_tasks,
+            },
+        )
+        .unwrap();
+        assert!(matches!(response.outcome, public::Outcome::Observed { .. }));
     }
 
     #[test]

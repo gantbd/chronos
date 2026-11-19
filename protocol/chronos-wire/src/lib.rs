@@ -4,6 +4,49 @@ pub use chronos_protocol::*;
 use serde::Serialize;
 use std::io::Write;
 
+pub fn decode_alignment_request_v1(
+    bytes: &[u8],
+    max_bytes: usize,
+    limits: alignment_v1::Limits,
+) -> Result<alignment_v1::Request, CodecError> {
+    if bytes.len() > max_bytes {
+        return Err(CodecError::Limit);
+    }
+    let request: alignment_v1::Request =
+        serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
+    request.validate(limits)?;
+    Ok(request)
+}
+
+pub fn decode_alignment_response_v1(
+    bytes: &[u8],
+    max_bytes: usize,
+    request: &alignment_v1::Request,
+    limits: alignment_v1::Limits,
+) -> Result<alignment_v1::Response, CodecError> {
+    if bytes.len() > max_bytes {
+        return Err(CodecError::Limit);
+    }
+    let response: alignment_v1::Response =
+        serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
+    response.validate_for(request, limits)?;
+    Ok(response)
+}
+
+pub fn alignment_refusal_v1(error: CodecError) -> alignment_v1::Response {
+    alignment_v1::Response {
+        version: 1,
+        outcome: alignment_v1::Outcome::Refused {
+            code: match error {
+                CodecError::Limit => alignment_v1::RefusalCode::Limit,
+                CodecError::Capacity => alignment_v1::RefusalCode::Capacity,
+                CodecError::Version => alignment_v1::RefusalCode::UnsupportedVersion,
+                CodecError::Malformed => alignment_v1::RefusalCode::InvalidRequest,
+            },
+        },
+    }
+}
+
 pub fn decode_request_v2(
     bytes: &[u8],
     limits: Limits,

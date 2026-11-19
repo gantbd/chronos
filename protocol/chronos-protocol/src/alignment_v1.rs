@@ -123,6 +123,82 @@ pub struct Observation {
     pub currentness: Currentness,
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Command {
+    Observe { chronos_scope: String },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Request {
+    pub version: u16,
+    pub command: Command,
+}
+
+impl Request {
+    pub fn validate(&self, limits: Limits) -> Result<(), CodecError> {
+        if self.version != 1 {
+            return Err(CodecError::Version);
+        }
+        if limits.max_field_bytes == 0 || limits.max_evidence == 0 || limits.max_next_tasks == 0 {
+            return Err(CodecError::Limit);
+        }
+        match &self.command {
+            Command::Observe { chronos_scope } => {
+                check_field(chronos_scope, limits.max_field_bytes)
+            }
+        }
+    }
+
+    pub fn chronos_scope(&self) -> &str {
+        match &self.command {
+            Command::Observe { chronos_scope } => chronos_scope,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalCode {
+    InvalidRequest,
+    UnsupportedVersion,
+    Unauthorized,
+    Unavailable,
+    Limit,
+    Capacity,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Outcome {
+    Observed { observation: Box<Observation> },
+    Refused { code: RefusalCode },
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Response {
+    pub version: u16,
+    pub outcome: Outcome,
+}
+
+impl Response {
+    pub fn validate_for(&self, request: &Request, limits: Limits) -> Result<(), CodecError> {
+        request.validate(limits)?;
+        if self.version != 1 {
+            return Err(CodecError::Version);
+        }
+        if let Outcome::Observed { observation } = &self.outcome {
+            observation.validate(limits)?;
+            if observation.chronos_scope != request.chronos_scope() {
+                return Err(CodecError::Malformed);
+            }
+        }
+        Ok(())
+    }
+}
+
 impl Observation {
     pub fn validate(&self, limits: Limits) -> Result<(), CodecError> {
         if self.version != 1 {
@@ -404,6 +480,35 @@ mod tests {
         terminal_control.recommended_next[0].task = "next\u{1b}[2J".into();
         assert_eq!(
             terminal_control.validate(limits()),
+            Err(CodecError::Malformed)
+        );
+    }
+
+    #[test]
+    fn request_and_response_bind_the_exact_chronos_scope() {
+        let request = Request {
+            version: 1,
+            command: Command::Observe {
+                chronos_scope: "product-delivery".into(),
+            },
+        };
+        assert!(request.validate(limits()).is_ok());
+        let response = Response {
+            version: 1,
+            outcome: Outcome::Observed {
+                observation: Box::new(observation()),
+            },
+        };
+        assert!(response.validate_for(&request, limits()).is_ok());
+
+        let wrong_scope = Request {
+            version: 1,
+            command: Command::Observe {
+                chronos_scope: "different-owner".into(),
+            },
+        };
+        assert_eq!(
+            response.validate_for(&wrong_scope, limits()),
             Err(CodecError::Malformed)
         );
     }

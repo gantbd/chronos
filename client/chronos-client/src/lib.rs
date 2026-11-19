@@ -2,6 +2,14 @@
 #![forbid(unsafe_code)]
 pub mod observer;
 pub mod workbench;
+/// Read-only product alignment observation. No control method is paired with it.
+pub trait AlignmentWireClientV1 {
+    type Error;
+    fn request_alignment_v1(
+        &mut self,
+        request: chronos_protocol::alignment_v1::Request,
+    ) -> Result<chronos_protocol::alignment_v1::Response, Self::Error>;
+}
 /// Atomic graph-plus-eligibility admission with command-scoped reconciliation.
 pub trait ScheduledAdmissionWireClientV7 {
     type Error;

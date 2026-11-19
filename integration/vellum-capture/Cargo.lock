@@ -216,6 +216,7 @@ dependencies = [
  "chronos-protocol",
  "chronos-sdk-embedded",
  "chronos-tui",
+ "chronos-wire",
  "keystone-observe 0.0.1",
  "keystone-storage",
  "pantheon",

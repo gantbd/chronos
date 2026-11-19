@@ -126,6 +126,15 @@ next work, duplicate references, codec refusal, weak-receipt fencing, disclosure
 denial and real directory drop/reopen; strict Clippy qualifies both protocol and
 integration library surfaces.
 
+The transport seam now reuses Chronos's bounded newline framing and exact
+`NotSent`/`OutcomeUnknown` client classifications. A closed observe request binds
+the expected Chronos scope; the integration host re-reads the current frontier
+and disclosure policy for that scope before answering. The verified local client
+uses an independent `chronos.alignment.sock` in an owner-only directory, and the
+integration supplies a one-request Unix connection handler. Deployment still
+owns listener creation, endpoint identity, the accept loop, shutdown and restart;
+those lifecycle responsibilities and a real configured proposal remain open.
+
 ## Independent text handoff
 
 `text_handoff` renders an explicitly authorized full source capture alongside a
