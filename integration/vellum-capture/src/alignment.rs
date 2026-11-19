@@ -1335,6 +1335,10 @@ mod tests {
                     machine_digest: [11; 32],
                     state_digest: [12; 32],
                 },
+                grounding_provenance: Some(d::GroundingSourceProvenanceV1 {
+                    fold_content_digest: [22; 32],
+                    orthogonality_content_digest: [23; 32],
+                }),
                 claims: vec![d::ClaimKindV1::Normative],
                 criteria: vec![d::CriterionV1 {
                     id: d::CriterionIdV1([13; 16]),
@@ -1510,6 +1514,19 @@ mod tests {
             .current_deliberation_evidence("product-delivery", &retained)
             .unwrap();
         assert_eq!(observed.evidence_frontier.len(), 7);
+        assert_eq!(observed.grounding.method_content_digest, [11; 32]);
+        assert_eq!(observed.grounding.fold_content_digest, [22; 32]);
+        assert_eq!(observed.grounding.orthogonality_content_digest, [23; 32]);
+        assert_eq!(observed.grounding.selections.len(), 3);
+        assert_eq!(
+            observed.grounding.selections[0],
+            frontier::GroundingSelectionV1 {
+                member: d::EnsembleMemberIdV1([1; 16]),
+                authority_digest: [4; 32],
+                surface_digest: [5; 32],
+                depth: d::SurfaceDepthV1::Activated,
+            }
+        );
         assert_eq!(observed.unresolved_dissent.len(), 1);
         assert_eq!(observed.unresolved_dissent[0].owner(), "moira");
         assert_eq!(
@@ -1531,6 +1548,26 @@ mod tests {
                 d::CommandV1::Review { .. },
                 d::CommandV1::Status
             ]
+        ));
+
+        let mut legacy_view = moira_cohort_view();
+        legacy_view.plan.grounding_provenance = None;
+        let mut legacy = frontier::MoiraDeliberationFrontierSourceV1::new(
+            MoiraCohortPort {
+                status_revisions: [7, 7].into(),
+                view: legacy_view,
+                review: None,
+                commands: Vec::new(),
+            },
+            "product-delivery".into(),
+            d::DeliberationIdV1([9; 16]),
+            retained.clone(),
+            limits(),
+        )
+        .unwrap();
+        assert!(matches!(
+            legacy.current_deliberation_evidence("product-delivery", &retained),
+            Err(frontier::MoiraDeliberationFrontierReadErrorV1::GroundingProvenanceMissing)
         ));
     }
 

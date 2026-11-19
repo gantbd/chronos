@@ -164,8 +164,14 @@ source-report/digest unresolved-dissent projection, and discovers a human gate
 only while an exact request has no matching response. Concurrent owner change,
 reopen-required state, a mismatched review, scope/cohort drift and limit
 overflow all refuse. This remains a deliberation-owned fragment: it does not
-claim Tellus grounding applicability or a budget-policy owner.
-Scope-bound Tellus grounding evidence, a live budget-policy reader, and the
+claim Tellus grounding applicability or a budget-policy owner. Moira's current
+plan now also supplies the exact method, fold and orthogonality source-content
+identities issued by Dendrite plus each selected member's authority, surface and
+depth. The reader exposes those as typed grounding requirements and refuses
+legacy plans that lack source provenance. Retention is not freshness: only a
+Tellus owner adapter that re-proves those requirements against current sources
+may contribute grounding evidence to the alignment frontier.
+That scope-bound Tellus verifier, a live budget-policy reader, and the
 packaged production composition remain open. Live document binding no longer requires a persisted
 process-local ID: the locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.

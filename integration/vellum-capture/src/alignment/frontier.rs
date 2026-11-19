@@ -525,6 +525,26 @@ pub struct DeliberationEvidenceFrontierV1 {
     pub evidence_frontier: Vec<OwnerEvidenceRefV1>,
     pub unresolved_dissent: Vec<OwnerEvidenceRefV1>,
     pub pending_human_gates: Vec<OwnerEvidenceRefV1>,
+    pub grounding: GroundingEvidenceFrontierV1,
+}
+
+/// Exact Moira-retained grounding requirements for one selected ensemble.
+/// These are requirements, not proof that the referenced Dendrite sources are
+/// still current; a Tellus owner adapter must independently verify them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GroundingEvidenceFrontierV1 {
+    pub method_content_digest: [u8; 32],
+    pub fold_content_digest: [u8; 32],
+    pub orthogonality_content_digest: [u8; 32],
+    pub selections: Vec<GroundingSelectionV1>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GroundingSelectionV1 {
+    pub member: moira_protocol::deliberation::EnsembleMemberIdV1,
+    pub authority_digest: [u8; 32],
+    pub surface_digest: [u8; 32],
+    pub depth: moira_protocol::deliberation::SurfaceDepthV1,
 }
 
 pub trait DeliberationEvidenceFrontierSourceV1 {
@@ -548,6 +568,7 @@ pub enum MoiraDeliberationFrontierReadErrorV1<E> {
     Missing,
     ReopenRequired,
     InvalidResponse,
+    GroundingProvenanceMissing,
     Unstable,
     Limit,
 }
@@ -709,6 +730,28 @@ where
         {
             return Err(MoiraDeliberationFrontierReadErrorV1::InvalidResponse);
         }
+        let Some(grounding_provenance) = deliberation.plan.grounding_provenance else {
+            return Err(MoiraDeliberationFrontierReadErrorV1::GroundingProvenanceMissing);
+        };
+        if deliberation.plan.members.len() > self.limits.max_evidence {
+            return Err(MoiraDeliberationFrontierReadErrorV1::Limit);
+        }
+        let grounding = GroundingEvidenceFrontierV1 {
+            method_content_digest: deliberation.plan.method.machine_digest,
+            fold_content_digest: grounding_provenance.fold_content_digest,
+            orthogonality_content_digest: grounding_provenance.orthogonality_content_digest,
+            selections: deliberation
+                .plan
+                .members
+                .iter()
+                .map(|member| GroundingSelectionV1 {
+                    member: member.id,
+                    authority_digest: member.grounding.authority_digest,
+                    surface_digest: member.grounding.surface_digest,
+                    depth: member.grounding.depth,
+                })
+                .collect(),
+        };
 
         let mut evidence = std::collections::BTreeSet::new();
         evidence.insert(self.reference(
@@ -771,6 +814,7 @@ where
             evidence_frontier: self.bounded(evidence)?,
             unresolved_dissent: self.bounded(unresolved_dissent)?,
             pending_human_gates: self.bounded(pending_human_gates)?,
+            grounding,
         })
     }
 }
