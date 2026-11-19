@@ -195,8 +195,11 @@ goal and policy each get an independently authenticated Vellum client loaded
 from the private credential store. Paths must be absolute, time/frame bounds are
 finite, ordinary debug output is redacted, and the resulting type still exposes
 only the twice-sampled read frontier. A process-separated all-owner live gate,
-composition-root configuration, listener launch and recurring PM worker remain
-open. Live document binding no longer requires a persisted
+composition-root configuration and recurring PM worker remain open. A bounded
+runtime wrapper now binds that frontier and caller-supplied disclosure policy to
+the existing independently owned alignment listener, serves one request or an
+OS-readiness-driven loop, and leaves signal installation plus the exact shutdown
+channel with the composition root. Live document binding no longer requires a persisted
 process-local ID: the locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
 Its evidence token includes the live workspace identity, document identity and

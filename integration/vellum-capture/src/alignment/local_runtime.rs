@@ -4,13 +4,16 @@
 //! Chronos, apply a recommendation, answer a human gate, or grant authority.
 
 use super::{
-    AlignmentBasisV1, AlignmentErrorV1, AlignmentLimitsV1, OwnerEvidenceRefV1,
+    AlignmentBasisV1, AlignmentDisclosureV1, AlignmentErrorV1, AlignmentJournalV1,
+    AlignmentLimitsV1, AlignmentRegisterV1, OwnerEvidenceRefV1,
     frontier::{
         ChronosControlTaskReadErrorV1, ChronosControlTaskSourceV1, LiveAlignmentFrontierV1,
         MoiraCohortBindingV1, MoiraCohortFrontierSourceV1, MoiraDeliberationFrontierSourceV1,
         OwnerComposedEvidenceFrontierSourceV1, TellusGroundingFrontierSourceV1,
         VellumLocatorBudgetPolicyFrontierSourceV1, VellumLocatorGoalFrontierSourceV1,
     },
+    host::AlignmentHostV1,
+    local::{AlignmentListenerSignalsV1, AlignmentListenerV1},
 };
 use moira_client::{
     DeliberationServicePort,
@@ -18,6 +21,7 @@ use moira_client::{
 };
 use std::{
     net::SocketAddr,
+    os::unix::net::UnixStream,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -127,6 +131,87 @@ pub enum LocalAlignmentBuildErrorV1 {
     VellumConnection,
     MoiraConnection,
     TellusConnection,
+    Listener,
+}
+
+/// Bound local read-only service. The caller still owns signal installation,
+/// the shutdown channel, disclosure policy, and the retained register's
+/// creation and authorization lifecycle.
+pub struct LocalProductAlignmentRuntimeV1<J, D> {
+    host: AlignmentHostV1<J, LocalProductAlignmentFrontierV1, D>,
+    listener: AlignmentListenerV1,
+    max_request_bytes: usize,
+    max_response_bytes: usize,
+    protocol_limits: chronos_protocol::alignment_v1::Limits,
+}
+
+impl<J, D> LocalProductAlignmentRuntimeV1<J, D>
+where
+    J: AlignmentJournalV1,
+    D: AlignmentDisclosureV1,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind(
+        register: AlignmentRegisterV1<J>,
+        binding: LocalAlignmentBindingV1,
+        connections: LocalAlignmentConnectionsV1,
+        disclosure: D,
+        listener_directory: impl AsRef<Path>,
+        max_request_bytes: usize,
+        max_response_bytes: usize,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, LocalAlignmentBuildErrorV1> {
+        if max_request_bytes == 0 || max_response_bytes == 0 {
+            return Err(LocalAlignmentBuildErrorV1::InvalidConfiguration);
+        }
+        let retained = register.record().proposal().basis().clone();
+        let frontier = connect_local_product_alignment_v1(retained, binding, connections, limits)?;
+        let listener = AlignmentListenerV1::bind(listener_directory)
+            .map_err(|_| LocalAlignmentBuildErrorV1::Listener)?;
+        Ok(Self {
+            host: AlignmentHostV1::new(register, frontier, disclosure, limits),
+            listener,
+            max_request_bytes,
+            max_response_bytes,
+            protocol_limits: chronos_protocol::alignment_v1::Limits {
+                max_field_bytes: limits.max_field_bytes,
+                max_evidence: limits.max_evidence,
+                max_next_tasks: limits.max_next_tasks,
+            },
+        })
+    }
+
+    pub fn signals(&self) -> AlignmentListenerSignalsV1 {
+        self.listener.signals()
+    }
+
+    pub fn serve_one(&mut self) -> Result<(), &'static str> {
+        self.listener.serve_one(
+            &mut self.host,
+            self.max_request_bytes,
+            self.max_response_bytes,
+            self.protocol_limits,
+        )
+    }
+
+    pub fn run_with_shutdown(&mut self, wake: &UnixStream) -> Result<(), &'static str> {
+        self.listener.run_with_shutdown(
+            &mut self.host,
+            wake,
+            self.max_request_bytes,
+            self.max_response_bytes,
+            self.protocol_limits,
+        )
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        AlignmentHostV1<J, LocalProductAlignmentFrontierV1, D>,
+        AlignmentListenerV1,
+    ) {
+        (self.host, self.listener)
+    }
 }
 
 /// Connect every owner through its public local client and build the exact
