@@ -268,7 +268,7 @@ impl Observation {
     }
 }
 
-fn validate_source(value: &SourceReference, limits: Limits) -> Result<(), CodecError> {
+pub(crate) fn validate_source(value: &SourceReference, limits: Limits) -> Result<(), CodecError> {
     for field in [
         &value.namespace,
         &value.document,
@@ -299,7 +299,10 @@ fn validate_source(value: &SourceReference, limits: Limits) -> Result<(), CodecE
     }
 }
 
-fn validate_control_task(value: &ControlTaskObservation, limits: Limits) -> Result<(), CodecError> {
+pub(crate) fn validate_control_task(
+    value: &ControlTaskObservation,
+    limits: Limits,
+) -> Result<(), CodecError> {
     validate_alignment_reference(&value.reference, limits.max_field_bytes)?;
     validate_revision(&value.revision)?;
     if matches!(value.revision, Revision::Exhausted)
@@ -323,7 +326,7 @@ fn validate_control_task(value: &ControlTaskObservation, limits: Limits) -> Resu
     }
 }
 
-fn validate_cohort(value: &Cohort, limits: Limits) -> Result<(), CodecError> {
+pub(crate) fn validate_cohort(value: &Cohort, limits: Limits) -> Result<(), CodecError> {
     for principal in [
         &value.external_advocate,
         &value.product_manager,
@@ -341,14 +344,17 @@ fn validate_cohort(value: &Cohort, limits: Limits) -> Result<(), CodecError> {
     }
 }
 
-fn validate_evidence(value: &OwnerEvidenceReference, limits: Limits) -> Result<(), CodecError> {
+pub(crate) fn validate_evidence(
+    value: &OwnerEvidenceReference,
+    limits: Limits,
+) -> Result<(), CodecError> {
     for field in [&value.owner, &value.resource, &value.revision] {
         check_field(field, limits.max_field_bytes)?;
     }
     Ok(())
 }
 
-fn validate_evidence_set(
+pub(crate) fn validate_evidence_set(
     values: &[OwnerEvidenceReference],
     limits: Limits,
 ) -> Result<(), CodecError> {
@@ -365,11 +371,11 @@ fn validate_evidence_set(
     }
 }
 
-fn same_task(left: &Reference, right: &Reference) -> bool {
+pub(crate) fn same_task(left: &Reference, right: &Reference) -> bool {
     left.task == right.task && left.incarnation == right.incarnation
 }
 
-fn check_field(value: &str, max: usize) -> Result<(), CodecError> {
+pub(crate) fn check_field(value: &str, max: usize) -> Result<(), CodecError> {
     check_name(value, max)?;
     if value.chars().any(char::is_control) {
         Err(CodecError::Malformed)
@@ -378,12 +384,15 @@ fn check_field(value: &str, max: usize) -> Result<(), CodecError> {
     }
 }
 
-fn validate_alignment_reference(value: &Reference, max: usize) -> Result<(), CodecError> {
+pub(crate) fn validate_alignment_reference(
+    value: &Reference,
+    max: usize,
+) -> Result<(), CodecError> {
     validate_reference(value, max)?;
     check_field(&value.task, max)
 }
 
-fn same_source(left: &SourceReference, right: &SourceReference) -> bool {
+pub(crate) fn same_source(left: &SourceReference, right: &SourceReference) -> bool {
     left == right
 }
 

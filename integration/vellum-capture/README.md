@@ -235,8 +235,8 @@ references or the sampled alignment evidence; a human escalation must name an
 exact pending gate from that basis. The contract refuses role collapse, an
 attempt or lease without an exact task observation, false `Aligned` judgment
 in the presence of conflict/gate evidence, and invented conflict or gate
-strings. It has no mutation or acceptance method. Owner readers, public
-projection, recurring/coalesced activation, attributed Agora challenge and
+strings. It has no mutation or acceptance method. Live owner readers, a local
+endpoint, recurring/coalesced activation, attributed Agora challenge and
 separately authorized proposal application remain open.
 
 The reconciliation now has an immutable durable record. Its closed V1 codec
@@ -245,8 +245,17 @@ checkpoint-backed register requires a durable acknowledgement, refuses weak or
 indeterminate creation, conflicts rather than overwriting an existing record,
 and reopens the exact reconciliation after restart. The ledger directory is
 exclusive to this record and must not be shared with the proposal register or
-Chronos service. This closes local durability only: owner readers, a public
-projection and the operational PM loop remain open.
+Chronos service. This closes local durability only: live owner readers, a local
+endpoint and the operational PM loop remain open.
+
+The owner-neutral `dual_frontier_v1` protocol now projects the exact durable
+record only after host disclosure and a fresh alignment-basis comparison. It
+classifies goal, work, cohort and evidence drift, independently revalidates
+role/evidence/gate laws, and exposes only a scope-bound `Observe` command.
+Chronos wire encoding/decoding and the remote-client port carry that same
+closed profile without depending on the private record. No local listener or
+worker-frontier reader is packaged yet, so this is a public protocol boundary,
+not an attachable operational service.
 
 Live document binding no longer requires a persisted process-local ID: the
 locator-backed reader uses Vellum's existing exact

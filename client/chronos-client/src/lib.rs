@@ -10,6 +10,15 @@ pub trait AlignmentWireClientV1 {
         request: chronos_protocol::alignment_v1::Request,
     ) -> Result<chronos_protocol::alignment_v1::Response, Self::Error>;
 }
+/// Read-only dual-frontier PM reconciliation observation. No control method is
+/// paired with it.
+pub trait DualFrontierWireClientV1 {
+    type Error;
+    fn request_dual_frontier_v1(
+        &mut self,
+        request: chronos_protocol::dual_frontier_v1::Request,
+    ) -> Result<chronos_protocol::dual_frontier_v1::Response, Self::Error>;
+}
 /// Atomic graph-plus-eligibility admission with command-scoped reconciliation.
 pub trait ScheduledAdmissionWireClientV7 {
     type Error;

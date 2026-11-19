@@ -47,6 +47,49 @@ pub fn alignment_refusal_v1(error: CodecError) -> alignment_v1::Response {
     }
 }
 
+pub fn decode_dual_frontier_request_v1(
+    bytes: &[u8],
+    max_bytes: usize,
+    limits: dual_frontier_v1::Limits,
+) -> Result<dual_frontier_v1::Request, CodecError> {
+    if bytes.len() > max_bytes {
+        return Err(CodecError::Limit);
+    }
+    let request: dual_frontier_v1::Request =
+        serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
+    request.validate(limits)?;
+    Ok(request)
+}
+
+pub fn decode_dual_frontier_response_v1(
+    bytes: &[u8],
+    max_bytes: usize,
+    request: &dual_frontier_v1::Request,
+    limits: dual_frontier_v1::Limits,
+) -> Result<dual_frontier_v1::Response, CodecError> {
+    if bytes.len() > max_bytes {
+        return Err(CodecError::Limit);
+    }
+    let response: dual_frontier_v1::Response =
+        serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
+    response.validate_for(request, limits)?;
+    Ok(response)
+}
+
+pub fn dual_frontier_refusal_v1(error: CodecError) -> dual_frontier_v1::Response {
+    dual_frontier_v1::Response {
+        version: 1,
+        outcome: dual_frontier_v1::Outcome::Refused {
+            code: match error {
+                CodecError::Limit => dual_frontier_v1::RefusalCode::Limit,
+                CodecError::Capacity => dual_frontier_v1::RefusalCode::Capacity,
+                CodecError::Version => dual_frontier_v1::RefusalCode::UnsupportedVersion,
+                CodecError::Malformed => dual_frontier_v1::RefusalCode::InvalidRequest,
+            },
+        },
+    }
+}
+
 pub fn decode_request_v2(
     bytes: &[u8],
     limits: Limits,

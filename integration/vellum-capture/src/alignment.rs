@@ -236,6 +236,30 @@ impl AlignmentBasisV1 {
     pub fn pending_human_gates(&self) -> &[OwnerEvidenceRefV1] {
         &self.pending_human_gates
     }
+
+    /// Exact owner-reference comparison only. This does not establish that the
+    /// supplied basis was freshly or authoritatively observed.
+    pub fn currentness_against(&self, current: &Self) -> ProposalCurrentnessV1 {
+        if self.goal != current.goal {
+            ProposalCurrentnessV1::GoalChanged
+        } else if self.chronos_scope != current.chronos_scope
+            || self.control_task.reference != current.control_task.reference
+            || self.control_task.revision != current.control_task.revision
+            || self.control_task.task != current.control_task.task
+        {
+            ProposalCurrentnessV1::WorkChanged
+        } else if self.cohort != current.cohort {
+            ProposalCurrentnessV1::CohortChanged
+        } else if self.budget_policy != current.budget_policy
+            || self.evidence_frontier != current.evidence_frontier
+            || self.unresolved_dissent != current.unresolved_dissent
+            || self.pending_human_gates != current.pending_human_gates
+        {
+            ProposalCurrentnessV1::EvidenceChanged
+        } else {
+            ProposalCurrentnessV1::Current
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -351,25 +375,7 @@ impl GroomingProposalV1 {
     /// Deterministic currentness classification. `Current` means only that the
     /// supplied frontier is byte/exact-reference equal to the proposal basis.
     pub fn currentness(&self, current: &AlignmentBasisV1) -> ProposalCurrentnessV1 {
-        if self.basis.goal != current.goal {
-            ProposalCurrentnessV1::GoalChanged
-        } else if self.basis.chronos_scope != current.chronos_scope
-            || self.basis.control_task.reference != current.control_task.reference
-            || self.basis.control_task.revision != current.control_task.revision
-            || self.basis.control_task.task != current.control_task.task
-        {
-            ProposalCurrentnessV1::WorkChanged
-        } else if self.basis.cohort != current.cohort {
-            ProposalCurrentnessV1::CohortChanged
-        } else if self.basis.budget_policy != current.budget_policy
-            || self.basis.evidence_frontier != current.evidence_frontier
-            || self.basis.unresolved_dissent != current.unresolved_dissent
-            || self.basis.pending_human_gates != current.pending_human_gates
-        {
-            ProposalCurrentnessV1::EvidenceChanged
-        } else {
-            ProposalCurrentnessV1::Current
-        }
+        self.basis.currentness_against(current)
     }
 }
 
@@ -640,7 +646,9 @@ fn project_task_ref(task: &TaskRefV1) -> chronos_protocol::Reference {
     }
 }
 
-fn project_control_task(task: &RevisionedTaskSnapshotV1) -> public::ControlTaskObservation {
+pub(super) fn project_control_task(
+    task: &RevisionedTaskSnapshotV1,
+) -> public::ControlTaskObservation {
     public::ControlTaskObservation {
         reference: project_task_ref(&task.reference),
         revision: match task.revision {
@@ -666,7 +674,7 @@ fn project_control_task(task: &RevisionedTaskSnapshotV1) -> public::ControlTaskO
     }
 }
 
-fn project_source(source: &SourceReferenceV1) -> public::SourceReference {
+pub(super) fn project_source(source: &SourceReferenceV1) -> public::SourceReference {
     use vellum_host::annotation::{PointAffinity, PointMeaning};
     let evidence = source.target.source();
     public::SourceReference {
@@ -701,7 +709,7 @@ fn project_source(source: &SourceReferenceV1) -> public::SourceReference {
     }
 }
 
-fn project_evidence(value: &OwnerEvidenceRefV1) -> public::OwnerEvidenceReference {
+pub(super) fn project_evidence(value: &OwnerEvidenceRefV1) -> public::OwnerEvidenceReference {
     public::OwnerEvidenceReference {
         owner: value.owner.clone(),
         resource: value.resource.clone(),
@@ -719,7 +727,7 @@ const fn project_recommendation(value: GroomingRecommendationV1) -> public::Reco
     }
 }
 
-const fn project_currentness(value: ProposalCurrentnessV1) -> public::Currentness {
+pub(super) const fn project_currentness(value: ProposalCurrentnessV1) -> public::Currentness {
     match value {
         ProposalCurrentnessV1::Current => public::Currentness::Current,
         ProposalCurrentnessV1::GoalChanged => public::Currentness::GoalChanged,

@@ -9,6 +9,7 @@ use super::{
     AlignmentBasisV1, AlignmentErrorV1, AlignmentLimitsV1, OwnerEvidenceRefV1, PrincipalRefV1,
 };
 use crate::SourceReferenceV1;
+use chronos_protocol::dual_frontier_v1 as public;
 use chronos_sdk_embedded::engine::RevisionedTaskSnapshotV1;
 use keystone_storage::{CommitGate, CommitOutcome, Revision};
 
@@ -167,6 +168,18 @@ pub struct DualFrontierRegisterV1<J> {
     record: DualFrontierRecordV1,
 }
 
+/// Host-owned disclosure for an exact immutable reconciliation and a freshly
+/// supplied alignment basis. It grants observation only.
+pub trait DualFrontierDisclosureV1 {
+    fn allows(&mut self, record: &DualFrontierRecordV1, current: &AlignmentBasisV1) -> bool;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DualFrontierObservationErrorV1 {
+    Unauthorized,
+    Invalid,
+}
+
 impl<J: DualFrontierJournalV1> DualFrontierRegisterV1<J> {
     pub fn create(
         mut journal: J,
@@ -209,8 +222,94 @@ impl<J: DualFrontierJournalV1> DualFrontierRegisterV1<J> {
         &self.record
     }
 
+    pub fn observe(
+        &self,
+        current: &AlignmentBasisV1,
+        limits: AlignmentLimitsV1,
+        disclosure: &mut impl DualFrontierDisclosureV1,
+    ) -> Result<public::Observation, DualFrontierObservationErrorV1> {
+        validate_dual_record(&self.record, limits)
+            .map_err(|_| DualFrontierObservationErrorV1::Invalid)?;
+        super::revalidate_basis(current, limits)
+            .map_err(|_| DualFrontierObservationErrorV1::Invalid)?;
+        if !disclosure.allows(&self.record, current) {
+            return Err(DualFrontierObservationErrorV1::Unauthorized);
+        }
+        let value = &self.record.reconciliation;
+        let basis = &value.basis;
+        let observation = public::Observation {
+            version: 1,
+            record_revision: self.record.revision.to_string(),
+            chronos_scope: basis.chronos_scope().to_owned(),
+            goal: super::project_source(basis.goal()),
+            control_task: super::project_control_task(basis.control_task()),
+            cohort: chronos_protocol::alignment_v1::Cohort {
+                external_advocate: basis.cohort().external_advocate().as_str().to_owned(),
+                product_manager: basis.cohort().product_manager().as_str().to_owned(),
+                frontier_supervisor: basis.cohort().frontier_supervisor().as_str().to_owned(),
+            },
+            budget_policy: super::project_evidence(basis.budget_policy()),
+            evidence_frontier: basis
+                .evidence_frontier()
+                .iter()
+                .map(super::project_evidence)
+                .collect(),
+            unresolved_dissent: basis
+                .unresolved_dissent()
+                .iter()
+                .map(super::project_evidence)
+                .collect(),
+            pending_human_gates: basis
+                .pending_human_gates()
+                .iter()
+                .map(super::project_evidence)
+                .collect(),
+            external: project_worker(&value.external),
+            constrained: project_worker(&value.constrained),
+            author: value.author.as_str().to_owned(),
+            rationale: super::project_source(&value.rationale),
+            judgment: project_judgment(value.judgment),
+            conflicts: value
+                .conflicts
+                .iter()
+                .map(super::project_evidence)
+                .collect(),
+            human_gate: value.human_gate.as_ref().map(super::project_evidence),
+            currentness: super::project_currentness(basis.currentness_against(current)),
+        };
+        observation
+            .validate(public::Limits {
+                max_field_bytes: limits.max_field_bytes,
+                max_evidence: limits.max_evidence,
+            })
+            .map_err(|_| DualFrontierObservationErrorV1::Invalid)?;
+        Ok(observation)
+    }
+
     pub fn into_journal(self) -> J {
         self.journal
+    }
+}
+
+fn project_worker(value: &WorkerFrontierV1) -> public::WorkerFrontier {
+    public::WorkerFrontier {
+        principal: value.principal.as_str().to_owned(),
+        task: value.task.as_ref().map(super::project_control_task),
+        attempt: value.attempt.as_ref().map(super::project_evidence),
+        lease: value.lease.as_ref().map(super::project_evidence),
+        contribution: value.contribution.as_ref().map(super::project_evidence),
+        evidence: value.evidence.iter().map(super::project_evidence).collect(),
+    }
+}
+
+const fn project_judgment(value: ProductManagerJudgmentV1) -> public::Judgment {
+    match value {
+        ProductManagerJudgmentV1::Aligned => public::Judgment::Aligned,
+        ProductManagerJudgmentV1::BoundaryRequired => public::Judgment::BoundaryRequired,
+        ProductManagerJudgmentV1::PauseExternal => public::Judgment::PauseExternal,
+        ProductManagerJudgmentV1::PauseConstrained => public::Judgment::PauseConstrained,
+        ProductManagerJudgmentV1::HandoffRecommended => public::Judgment::HandoffRecommended,
+        ProductManagerJudgmentV1::EscalateHuman => public::Judgment::EscalateHuman,
     }
 }
 
@@ -426,6 +525,14 @@ mod tests {
         indeterminate: bool,
     }
 
+    struct Disclosure(bool);
+
+    impl DualFrontierDisclosureV1 for Disclosure {
+        fn allows(&mut self, _: &DualFrontierRecordV1, _: &AlignmentBasisV1) -> bool {
+            self.0
+        }
+    }
+
     impl DualFrontierJournalV1 for MemoryJournal {
         type Error = ();
 
@@ -581,6 +688,34 @@ mod tests {
         assert!(matches!(
             DualFrontierRegisterV1::create(shared, reconciliation(), limits()),
             Err(DualFrontierRegisterErrorV1::Conflict)
+        ));
+    }
+
+    #[test]
+    fn public_projection_requires_disclosure_and_classifies_currentness() {
+        let expected = reconciliation();
+        let current = expected.basis().clone();
+        let register =
+            DualFrontierRegisterV1::create(MemoryJournal::default(), expected, limits()).unwrap();
+        assert!(matches!(
+            register.observe(&current, limits(), &mut Disclosure(false)),
+            Err(DualFrontierObservationErrorV1::Unauthorized)
+        ));
+        let observed = register
+            .observe(&current, limits(), &mut Disclosure(true))
+            .unwrap();
+        assert!(matches!(
+            observed.currentness,
+            chronos_protocol::alignment_v1::Currentness::Current
+        ));
+
+        let changed = alignment_basis("goal-v2", 66);
+        let observed = register
+            .observe(&changed, limits(), &mut Disclosure(true))
+            .unwrap();
+        assert!(matches!(
+            observed.currentness,
+            chronos_protocol::alignment_v1::Currentness::GoalChanged
         ));
     }
 
