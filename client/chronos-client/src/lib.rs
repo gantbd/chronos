@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 pub mod observer;
 pub mod workbench;
+pub mod workflow;
 /// Read-only authoritative workflow status. Execution phase is diagnostic only.
 pub trait WorkflowWireClientV9 {
     type Error;

@@ -118,7 +118,7 @@ fn native_time(value: v5::Timestamp) -> Option<SystemTime> {
         UNIX_EPOCH.checked_add(duration)
     }
 }
-impl<C: WireClientV1> Model<C> {
+impl<C: WireClientV1 + WorkflowWireClientV9> Model<C> {
     pub fn with_scheduling(mut self) -> Self
     where
         C: chronos_client::SchedulingWireClientV5,

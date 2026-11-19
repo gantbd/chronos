@@ -3,6 +3,7 @@ use std::time::{Duration, SystemTime};
 use chronos_engine::{
     Agent, CancelError, CapabilityGrant, CompletionError, Disposition, Engine, EngineLimits,
     FailureDisposition, Operation, OutcomeDisposition, Recorder, Task, TaskId, TaskState,
+    TaskStatusV1,
 };
 
 fn grant(engine: &mut Engine, agent: Agent, now: SystemTime) -> CapabilityGrant {
@@ -38,10 +39,10 @@ fn cancelling_running_work_revokes_its_lease_and_cancels_unrunnable_descendants(
     engine.cancel(&TaskId::from("root")).unwrap();
 
     for id in ["root", "child", "grandchild"] {
-        assert!(matches!(
-            engine.task(&TaskId::from(id)).unwrap().state,
-            TaskState::Cancelled
-        ));
+        let task = engine.task(&TaskId::from(id)).unwrap();
+        assert!(matches!(task.state, TaskState::Cancelled));
+        assert_eq!(task.status, TaskStatusV1::Backlog);
+        assert!(task.blocker.is_none());
     }
     assert_eq!(
         engine.complete(&TaskId::from("root"), &lease(&running), now),

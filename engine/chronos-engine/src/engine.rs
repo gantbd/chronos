@@ -2093,10 +2093,13 @@ impl Engine {
                 break;
             }
             for id in cancelled {
-                self.tasks
+                let task = self
+                    .tasks
                     .get_mut(&id)
-                    .expect("selected dependent must exist")
-                    .state = TaskState::Cancelled;
+                    .expect("selected dependent must exist");
+                task.state = TaskState::Cancelled;
+                task.status = TaskStatusV1::Backlog;
+                task.blocker = None;
                 self.retain_outcome(id, None, None, OutcomeDisposition::DependencyCancelled);
             }
         }

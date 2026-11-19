@@ -1,9 +1,9 @@
 use chronos_adapter_native::EmbeddedClient;
-use chronos_client::WireClientV1;
+use chronos_client::{WireClientV1, WorkflowWireClientV9};
 use chronos_engine::{Engine, StateRevision, TaskSpecV2};
 use chronos_host::ClientV1;
 use chronos_model::{Action, DispatchError, MAX_SUBMIT_BATCH, Model, Worker};
-use chronos_protocol::{RetrySafety, TaskSpec};
+use chronos_protocol::{RetrySafety, TaskSpec, workflow_v9};
 use chronos_service::{Authorizer, Limits, Service};
 use std::sync::{
     Arc, Mutex,
@@ -64,7 +64,14 @@ fn marked_cancellation_reobserves_each_child_and_retains_independent_receipts() 
     model.apply(Action::ConfirmCancel);
 
     assert!(model.view.status.starts_with("Applied 3/3"));
-    assert!(model.view.rows.iter().all(|row| row.phase == "cancelled"));
+    assert!(
+        model
+            .view
+            .rows
+            .iter()
+            .all(|row| row.status == workflow_v9::Status::Backlog
+                && row.execution_phase == workflow_v9::ExecutionPhase::Cancelled)
+    );
     assert_eq!(model.view.cancel_receipts.len(), 3);
     assert!(
         model
@@ -125,8 +132,8 @@ fn marked_cancellation_stops_after_unknown_and_never_sends_later_children() {
             .iter()
             .find(|row| row.reference.task == "c")
             .unwrap()
-            .phase,
-        "ready"
+            .status,
+        workflow_v9::Status::Open
     );
 }
 fn client(shared: Shared) -> EmbeddedClient<Shared> {
@@ -169,8 +176,8 @@ fn two_clients_share_domain_state_but_not_selection_or_confirmation() {
             .iter()
             .find(|row| row.reference.task == "b")
             .unwrap()
-            .phase,
-        "ready"
+            .status,
+        workflow_v9::Status::Open
     );
 }
 
@@ -191,6 +198,24 @@ impl WireClientV1 for Faulty {
             return Err(());
         }
         let response = self.inner.request(request).map_err(|_| ())?;
+        if count == self.fail_at {
+            Err(())
+        } else {
+            Ok(response)
+        }
+    }
+}
+impl WorkflowWireClientV9 for Faulty {
+    type Error = ();
+    fn request_workflow_v9(
+        &mut self,
+        request: workflow_v9::Request,
+    ) -> Result<workflow_v9::Response, ()> {
+        let count = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        if count == self.fail_at && !self.after {
+            return Err(());
+        }
+        let response = self.inner.request_workflow_v9(request).map_err(|_| ())?;
         if count == self.fail_at {
             Err(())
         } else {
@@ -318,11 +343,15 @@ fn confirmation_is_consumed_once_and_discard_never_mutates() {
     model.apply(Action::PlanCancel);
     model.apply(Action::DiscardPlan);
     model.apply(Action::ConfirmCancel);
-    assert_eq!(model.view.rows[0].phase, "ready");
+    assert_eq!(model.view.rows[0].status, workflow_v9::Status::Open);
     model.apply(Action::PlanCancel);
     model.apply(Action::ConfirmCancel);
     model.apply(Action::ConfirmCancel);
-    assert_eq!(model.view.rows[0].phase, "cancelled");
+    assert_eq!(model.view.rows[0].status, workflow_v9::Status::Backlog);
+    assert_eq!(
+        model.view.rows[0].execution_phase,
+        workflow_v9::ExecutionPhase::Cancelled
+    );
     assert_eq!(model.view.revision, "2");
 }
 
@@ -384,6 +413,17 @@ fn blocked_backend_leaves_ui_dispatch_nonblocking_and_one_action_in_flight() {
             &mut self,
             _: chronos_protocol::Request,
         ) -> Result<chronos_protocol::Response, ()> {
+            self.entered.send(()).unwrap();
+            self.release.recv().unwrap();
+            Err(())
+        }
+    }
+    impl WorkflowWireClientV9 for Blocked {
+        type Error = ();
+        fn request_workflow_v9(
+            &mut self,
+            _: workflow_v9::Request,
+        ) -> Result<workflow_v9::Response, ()> {
             self.entered.send(()).unwrap();
             self.release.recv().unwrap();
             Err(())

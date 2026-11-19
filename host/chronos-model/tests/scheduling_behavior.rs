@@ -1,9 +1,9 @@
 use chronos_adapter_native::EmbeddedClient;
-use chronos_client::{SchedulingWireClientV5, WireClientV1};
+use chronos_client::{SchedulingWireClientV5, WireClientV1, WorkflowWireClientV9};
 use chronos_engine::{Engine, StateRevision, TaskSpecV2};
 use chronos_host::{ClientV1, native::*, scheduling::*};
 use chronos_model::{Action, DispatchError, EligibilityEdit, Model, SchedulingChange, Worker};
-use chronos_protocol::{Limits, Request, Response, scheduling_v5 as v5};
+use chronos_protocol::{Limits, Request, Response, scheduling_v5 as v5, workflow_v9};
 use chronos_service::{Authorizer, Service, scheduling::SchedulingAuthorizerV1};
 use std::{
     sync::{Arc, Mutex},
@@ -81,7 +81,7 @@ fn client(shared: Shared) -> EmbeddedClient<Shared> {
         },
     )
 }
-fn refresh<C: WireClientV1>(model: &mut Model<C>) {
+fn refresh<C: WireClientV1 + WorkflowWireClientV9>(model: &mut Model<C>) {
     model.apply(Action::RefreshScheduling(SystemTime::UNIX_EPOCH));
 }
 #[test]
@@ -191,6 +191,15 @@ impl WireClientV1 for Lost {
         self.inner.request(r).map_err(|_| ())
     }
 }
+impl WorkflowWireClientV9 for Lost {
+    type Error = ();
+    fn request_workflow_v9(
+        &mut self,
+        request: workflow_v9::Request,
+    ) -> Result<workflow_v9::Response, ()> {
+        self.inner.request_workflow_v9(request).map_err(|_| ())
+    }
+}
 impl SchedulingWireClientV5 for Lost {
     type Error = ();
     fn request_scheduling_v5(&mut self, r: v5::Request) -> Result<v5::Response, ()> {
@@ -236,6 +245,15 @@ fn blocked_scheduling_backend_keeps_one_nonblocking_action_and_does_not_queue_ed
             Err(())
         }
     }
+    impl WorkflowWireClientV9 for Blocked {
+        type Error = ();
+        fn request_workflow_v9(
+            &mut self,
+            _: workflow_v9::Request,
+        ) -> Result<workflow_v9::Response, ()> {
+            Err(())
+        }
+    }
     impl SchedulingWireClientV5 for Blocked {
         type Error = ();
         fn request_scheduling_v5(&mut self, _: v5::Request) -> Result<v5::Response, ()> {
@@ -278,6 +296,15 @@ fn controls_changing_between_overview_and_eligibility_invalidate_the_whole_proje
         type Error = ();
         fn request(&mut self, r: Request) -> Result<Response, ()> {
             self.inner.request(r).map_err(|_| ())
+        }
+    }
+    impl WorkflowWireClientV9 for Racing {
+        type Error = ();
+        fn request_workflow_v9(
+            &mut self,
+            request: workflow_v9::Request,
+        ) -> Result<workflow_v9::Response, ()> {
+            self.inner.request_workflow_v9(request).map_err(|_| ())
         }
     }
     impl SchedulingWireClientV5 for Racing {
@@ -385,6 +412,15 @@ impl WireClientV1 for LoseEligibility {
     type Error = ();
     fn request(&mut self, request: Request) -> Result<Response, ()> {
         self.inner.request(request).map_err(|_| ())
+    }
+}
+impl WorkflowWireClientV9 for LoseEligibility {
+    type Error = ();
+    fn request_workflow_v9(
+        &mut self,
+        request: workflow_v9::Request,
+    ) -> Result<workflow_v9::Response, ()> {
+        self.inner.request_workflow_v9(request).map_err(|_| ())
     }
 }
 impl SchedulingWireClientV5 for LoseEligibility {

@@ -2,11 +2,11 @@
 //! One bounded worker keeps service waits off either presentation thread.
 #![forbid(unsafe_code)]
 
-use chronos_client::WireClientV1;
+use chronos_client::{WireClientV1, WorkflowWireClientV9};
 mod scheduling;
 use chronos_protocol::{
-    Command, Cursor, Failure, FailureCode, Outcome, Phase, Reference, Request, Response,
-    RetrySafety, Revision, TaskSpec,
+    Command, Cursor, Failure, FailureCode, Outcome, Reference, Request, Response, RetrySafety,
+    Revision, TaskSpec, workflow_v9,
 };
 pub use scheduling::{
     EligibilityDisposition, EligibilityEdit, EligibilityReceipt, SchedulingChange, SchedulingView,
@@ -21,11 +21,38 @@ use std::sync::{
 #[derive(Clone, Debug)]
 pub struct Row {
     pub reference: Reference,
-    pub phase: &'static str,
+    pub status: workflow_v9::Status,
+    pub blocker: Option<workflow_v9::Blocker>,
+    pub execution_phase: workflow_v9::ExecutionPhase,
     pub priority: i32,
     pub attempt: Option<u32>,
     pub dependency_count: usize,
     pub required_capability_count: usize,
+}
+
+impl Row {
+    pub const fn status_label(&self) -> &'static str {
+        match self.status {
+            workflow_v9::Status::Backlog => "backlog",
+            workflow_v9::Status::Open => "open",
+            workflow_v9::Status::Blocked => "blocked",
+            workflow_v9::Status::InProgress => "in progress",
+            workflow_v9::Status::ReadyForReview => "ready for review",
+            workflow_v9::Status::Done => "done",
+        }
+    }
+
+    pub const fn execution_phase_label(&self) -> &'static str {
+        match self.execution_phase {
+            workflow_v9::ExecutionPhase::DependencyWait => "dependency wait",
+            workflow_v9::ExecutionPhase::Ready => "ready",
+            workflow_v9::ExecutionPhase::Running => "running",
+            workflow_v9::ExecutionPhase::Uncertain => "uncertain",
+            workflow_v9::ExecutionPhase::Succeeded => "succeeded",
+            workflow_v9::ExecutionPhase::Failed => "failed",
+            workflow_v9::ExecutionPhase::Cancelled => "cancelled",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -176,7 +203,7 @@ pub fn display_id(value: &str) -> String {
     value.chars().flat_map(char::escape_default).collect()
 }
 
-impl<C: WireClientV1> Model<C> {
+impl<C: WireClientV1 + WorkflowWireClientV9> Model<C> {
     pub fn new(client: C, writes: bool) -> Self {
         Self {
             scheduling: scheduling::State::default(),
@@ -189,7 +216,7 @@ impl<C: WireClientV1> Model<C> {
         }
     }
 
-    fn request(&mut self, request: Request) -> Result<Response, C::Error> {
+    fn request(&mut self, request: Request) -> Result<Response, <C as WireClientV1>::Error> {
         let started = std::time::Instant::now();
         increment(
             &mut self.view.signals.requests,
@@ -199,6 +226,38 @@ impl<C: WireClientV1> Model<C> {
         match &response {
             Ok(Response {
                 outcome: Outcome::Refused { .. },
+                ..
+            }) => increment(
+                &mut self.view.signals.refused,
+                &mut self.view.signals.saturated,
+            ),
+            Err(_) => increment(
+                &mut self.view.signals.backend_errors,
+                &mut self.view.signals.saturated,
+            ),
+            _ => (),
+        }
+        if let Some(total) = self.view.signals.residence.checked_add(started.elapsed()) {
+            self.view.signals.residence = total;
+        } else {
+            self.view.signals.saturated = true;
+        }
+        response
+    }
+
+    fn workflow_request(
+        &mut self,
+        request: workflow_v9::Request,
+    ) -> Result<workflow_v9::Response, <C as WorkflowWireClientV9>::Error> {
+        let started = std::time::Instant::now();
+        increment(
+            &mut self.view.signals.requests,
+            &mut self.view.signals.saturated,
+        );
+        let response = self.client.request_workflow_v9(request);
+        match &response {
+            Ok(workflow_v9::Response {
+                outcome: workflow_v9::Outcome::Refused { .. },
                 ..
             }) => increment(
                 &mut self.view.signals.refused,
@@ -379,14 +438,14 @@ impl<C: WireClientV1> Model<C> {
 
     fn page(&mut self, cursor: Option<Cursor>) {
         self.clear_plan();
-        match self.request(Request {
-            version: 1,
-            command: Command::Page { cursor, limit: 64 },
+        match self.workflow_request(workflow_v9::Request {
+            version: 9,
+            command: workflow_v9::Command::Page { cursor, limit: 64 },
         }) {
-            Ok(Response {
-                version: 1,
+            Ok(workflow_v9::Response {
+                version: 9,
                 outcome:
-                    Outcome::Page {
+                    workflow_v9::Outcome::Page {
                         revision,
                         entries,
                         next,
@@ -396,15 +455,9 @@ impl<C: WireClientV1> Model<C> {
                     .into_iter()
                     .map(|entry| Row {
                         reference: entry.reference,
-                        phase: match entry.snapshot.phase {
-                            Phase::Blocked => "blocked",
-                            Phase::Ready => "ready",
-                            Phase::Running => "running",
-                            Phase::Uncertain => "uncertain",
-                            Phase::Succeeded => "succeeded",
-                            Phase::Failed => "failed",
-                            Phase::Cancelled => "cancelled",
-                        },
+                        status: entry.snapshot.status,
+                        blocker: entry.snapshot.blocker,
+                        execution_phase: entry.snapshot.execution_phase,
                         priority: entry.snapshot.priority,
                         attempt: entry.snapshot.attempt_number,
                         dependency_count: entry.snapshot.dependency_count,
@@ -429,10 +482,10 @@ impl<C: WireClientV1> Model<C> {
                 self.next = next;
                 self.view.status = format!("Observed {} tasks on this page.", self.view.rows.len());
             }
-            Ok(Response {
-                outcome: Outcome::Refused { failure },
+            Ok(workflow_v9::Response {
+                outcome: workflow_v9::Outcome::Refused { code },
                 ..
-            }) => self.invalidate(refusal(&failure)),
+            }) => self.invalidate(workflow_refusal(code)),
             Ok(_) => self.invalidate("Unexpected response; refresh before mutation."),
             Err(_) => self.invalidate("Refresh failed. Cached rows are stale; no automatic retry."),
         }
@@ -633,6 +686,24 @@ fn refusal(failure: &Failure) -> &'static str {
     }
 }
 
+fn workflow_refusal(code: workflow_v9::RefusalCode) -> &'static str {
+    match code {
+        workflow_v9::RefusalCode::Unauthorized => "Current authority refused workflow observation.",
+        workflow_v9::RefusalCode::StaleCursor => {
+            "Workflow observation changed. Refresh from the first page."
+        }
+        workflow_v9::RefusalCode::InvalidPageSize
+        | workflow_v9::RefusalCode::Limit
+        | workflow_v9::RefusalCode::Capacity => "Workflow observation limit refused.",
+        workflow_v9::RefusalCode::RevisionExhausted => {
+            "Workflow revision exhausted; mutations are fenced."
+        }
+        workflow_v9::RefusalCode::InvalidRequest
+        | workflow_v9::RefusalCode::UnsupportedVersion
+        | workflow_v9::RefusalCode::Unavailable => "Workflow observation unavailable.",
+    }
+}
+
 /// One in-flight action, one bounded view handoff, no polling or automatic
 /// refresh loop. Dropping both interfaces disconnects and ends the worker.
 pub struct Worker {
@@ -685,18 +756,27 @@ pub enum DispatchError {
 }
 
 impl Worker {
-    pub fn spawn<C: WireClientV1 + Send + 'static>(client: C, writes: bool) -> Self {
+    pub fn spawn<C: WireClientV1 + WorkflowWireClientV9 + Send + 'static>(
+        client: C,
+        writes: bool,
+    ) -> Self {
         Self::spawn_model(Model::new(client, writes))
     }
     pub fn spawn_with_scheduling<
-        C: WireClientV1 + chronos_client::SchedulingWireClientV5 + Send + 'static,
+        C: WireClientV1
+            + WorkflowWireClientV9
+            + chronos_client::SchedulingWireClientV5
+            + Send
+            + 'static,
     >(
         client: C,
         writes: bool,
     ) -> Self {
         Self::spawn_model(Model::new(client, writes).with_scheduling())
     }
-    fn spawn_model<C: WireClientV1 + Send + 'static>(mut model: Model<C>) -> Self {
+    fn spawn_model<C: WireClientV1 + WorkflowWireClientV9 + Send + 'static>(
+        mut model: Model<C>,
+    ) -> Self {
         let (commands, receive) = mpsc::sync_channel(1);
         let (send, updates) = mpsc::sync_channel(1);
         let busy = Arc::new(AtomicBool::new(true));

@@ -43,6 +43,22 @@ impl<C: chronos_host::ClientV1> chronos_client::WireClientV1 for EmbeddedClient<
             .map_err(EmbeddedError::Host)
     }
 }
+impl<C: chronos_host::ClientV1> chronos_client::WorkflowWireClientV9 for EmbeddedClient<C> {
+    type Error = EmbeddedError<C::TransportError>;
+    fn request_workflow_v9(
+        &mut self,
+        request: chronos_wire::workflow_v9::Request,
+    ) -> Result<chronos_wire::workflow_v9::Response, Self::Error> {
+        request
+            .validate(self.limits)
+            .map_err(EmbeddedError::Request)?;
+        let native = workflow_v9::request(request, self.limits).map_err(EmbeddedError::Request)?;
+        self.host
+            .call(native)
+            .map(workflow_v9::response)
+            .map_err(EmbeddedError::Host)
+    }
+}
 use chronos_engine::{
     CancelError, ConditionalError, EngineError, ReadError, RetrySafetyV1, StateRevision, TaskId,
     TaskPageCursorV1, TaskRefV1, TaskSnapshotV1, TaskSpecV2,
