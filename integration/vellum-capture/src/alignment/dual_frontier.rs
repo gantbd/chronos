@@ -459,6 +459,56 @@ pub fn compose_reconciliation_v1(
     )
 }
 
+/// Whether a complete, stable owner sample warrants another PM judgment.
+/// `Unchanged` suppresses model invocation and proposal publication; it does
+/// not extend the freshness of the retained reconciliation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProductManagerRunDispositionV1 {
+    Reconcile,
+    Unchanged,
+}
+
+/// Compares only owner-supplied alignment and worker facts with the last
+/// durable reconciliation. PM-authored rationale and judgment are deliberately
+/// excluded: interpretation cannot make an unchanged owner frontier look new.
+/// Source unavailability and unstable reads refuse before this function is
+/// called and must remain observable as an incomplete run.
+pub fn plan_product_manager_run_v1(
+    retained: Option<&DualFrontierRecordV1>,
+    basis: &AlignmentBasisV1,
+    workers: &frontier::StableWorkerFrontiersV1,
+    limits: AlignmentLimitsV1,
+) -> Result<ProductManagerRunDispositionV1, AlignmentErrorV1> {
+    super::revalidate_basis(basis, limits).map_err(|_| AlignmentErrorV1::Invalid)?;
+    let external = revalidate_worker(workers.external(), limits)?;
+    let constrained = revalidate_worker(workers.constrained(), limits)?;
+    if external.kind() != FrontierKindV1::ExternalSupervisor
+        || constrained.kind() != FrontierKindV1::PantheonConstrainedWorker
+        || external.principal() != basis.cohort().frontier_supervisor()
+        || external.principal() == constrained.principal()
+        || constrained.principal() == basis.cohort().external_advocate()
+        || constrained.principal() == basis.cohort().product_manager()
+    {
+        return Err(AlignmentErrorV1::Invalid);
+    }
+    let Some(retained) = retained else {
+        return Ok(ProductManagerRunDispositionV1::Reconcile);
+    };
+    validate_dual_record(retained, limits).map_err(|error| match error {
+        DualFrontierRegisterErrorV1::Limit => AlignmentErrorV1::Limit,
+        _ => AlignmentErrorV1::Invalid,
+    })?;
+    let previous = retained.reconciliation();
+    if previous.basis() == basis
+        && previous.external() == &external
+        && previous.constrained() == &constrained
+    {
+        Ok(ProductManagerRunDispositionV1::Unchanged)
+    } else {
+        Ok(ProductManagerRunDispositionV1::Reconcile)
+    }
+}
+
 /// A PM-authored, authority-free reconciliation bound to the same exact owner
 /// frontier as the product-alignment proposal. Rich rationale remains in
 /// Vellum; Agora challenge and every owner mutation remain separate effects.
@@ -975,6 +1025,64 @@ mod tests {
         assert_eq!(
             compose_reconciliation_v1(basis, sampler.sample().unwrap(), invented, limits()),
             Err(AlignmentErrorV1::Invalid)
+        );
+    }
+
+    #[test]
+    fn pm_run_planner_coalesces_only_an_exact_owner_frontier() {
+        let retained = DualFrontierRecordV1 {
+            revision: 0,
+            reconciliation: reconciliation(),
+        };
+        let basis = retained.reconciliation().basis().clone();
+        let external = retained.reconciliation().external().clone();
+        let constrained = retained.reconciliation().constrained().clone();
+        let mut same = frontier::StableWorkerFrontierSamplerV1::new(
+            &basis,
+            principal("insider"),
+            WorkerSource::stable(external.clone()),
+            WorkerSource::stable(constrained.clone()),
+            limits(),
+        )
+        .unwrap();
+        let same = same.sample().unwrap();
+
+        assert_eq!(
+            plan_product_manager_run_v1(None, &basis, &same, limits()),
+            Ok(ProductManagerRunDispositionV1::Reconcile)
+        );
+        assert_eq!(
+            plan_product_manager_run_v1(Some(&retained), &basis, &same, limits()),
+            Ok(ProductManagerRunDispositionV1::Unchanged)
+        );
+
+        let changed_external = WorkerFrontierV1::new(
+            FrontierKindV1::ExternalSupervisor,
+            principal("frontier-supervisor"),
+            None,
+            None,
+            None,
+            None,
+            vec![reference("external/evidence/new")],
+            limits(),
+        )
+        .unwrap();
+        let mut changed = frontier::StableWorkerFrontierSamplerV1::new(
+            &basis,
+            principal("insider"),
+            WorkerSource::stable(changed_external),
+            WorkerSource::stable(constrained),
+            limits(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan_product_manager_run_v1(
+                Some(&retained),
+                &basis,
+                &changed.sample().unwrap(),
+                limits(),
+            ),
+            Ok(ProductManagerRunDispositionV1::Reconcile)
         );
     }
 
