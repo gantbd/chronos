@@ -171,8 +171,16 @@ depth. The reader exposes those as typed grounding requirements and refuses
 legacy plans that lack source provenance. Retention is not freshness: only a
 Tellus owner adapter that re-proves those requirements against current sources
 may contribute grounding evidence to the alignment frontier.
-That scope-bound Tellus verifier, a live budget-policy reader, and the
-packaged production composition remain open. Live document binding no longer requires a persisted
+The concrete Tellus grounding reader now performs that proof through Tellus's
+typed verification port. It is bound to the exact Chronos scope and stakeholder
+cohort, submits every retained source identity and member authority/surface/depth
+requirement, and refuses stale, mismatched, reordered, oversized or transport-
+unavailable results. Only a current response becomes bounded Tellus-owned source
+and member references. Those references are currentness material, not grants;
+the Moira deliberation revision continues to bind authority requirements while
+the Tellus member reference binds member, depth and current surface. A live
+budget-policy reader and the packaged multi-owner production composition remain
+open. Live document binding no longer requires a persisted
 process-local ID: the locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
 Its evidence token includes the live workspace identity, document identity and

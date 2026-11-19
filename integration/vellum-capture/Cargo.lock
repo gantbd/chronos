@@ -232,6 +232,7 @@ dependencies = [
  "moira-protocol",
  "pantheon",
  "rustix",
+ "tellus",
  "vellum-adapter-local-fs",
  "vellum-client",
  "vellum-engine",

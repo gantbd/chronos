@@ -25,6 +25,7 @@ vellum-client = { path = "../../../vellum/client/vellum-client", version = "=0.1
 vellum-protocol = { path = "../../../vellum/protocol/vellum-protocol", version = "=0.1.0" }
 moira-client = { path = "../../../moira/crates/moira-client", version = "=0.1.0" }
 moira-protocol = { path = "../../../moira/crates/moira-protocol", version = "=0.1.0" }
+tellus = { path = "../../../tellus", version = "=0.1.0" }
 keystone-storage = { path = "../../third_party/keystone-storage-0.0.1", version = "=0.0.1-chronos.1" }
 keystone-observe = { path = "../../../keystone/crates/keystone-observe", version = "=0.0.1" }
 chronos-adapter-checkpoint = { path = "../../adapters/checkpoint", version = "=0.1.0" }

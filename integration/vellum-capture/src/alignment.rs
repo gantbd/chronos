@@ -1571,6 +1571,154 @@ mod tests {
         ));
     }
 
+    #[derive(Clone)]
+    struct TellusGroundingPort {
+        result: tellus::GroundingVerificationV1,
+        requests: Vec<tellus::GroundingVerificationRequestV1>,
+    }
+
+    impl tellus::GroundingVerificationPort for TellusGroundingPort {
+        type Error = ();
+
+        fn verify_grounding(
+            &mut self,
+            request: &tellus::GroundingVerificationRequestV1,
+        ) -> Result<tellus::GroundingVerificationV1, Self::Error> {
+            self.requests.push(request.clone());
+            Ok(self.result.clone())
+        }
+    }
+
+    fn grounding_requirements() -> frontier::GroundingEvidenceFrontierV1 {
+        frontier::GroundingEvidenceFrontierV1 {
+            method_content_digest: [11; 32],
+            fold_content_digest: [22; 32],
+            orthogonality_content_digest: [23; 32],
+            selections: vec![frontier::GroundingSelectionV1 {
+                member: moira_protocol::deliberation::EnsembleMemberIdV1([1; 16]),
+                authority_digest: [4; 32],
+                surface_digest: [5; 32],
+                depth: moira_protocol::deliberation::SurfaceDepthV1::Activated,
+            }],
+        }
+    }
+
+    fn current_grounding_result() -> tellus::GroundingVerificationV1 {
+        tellus::GroundingVerificationV1::Current {
+            sources: tellus::VerifiedGroundingSourcesV1 {
+                method: tellus::VerifiedGroundingSourceV1 {
+                    load_id: "method".into(),
+                    sha256: [11; 32],
+                },
+                fold: tellus::VerifiedGroundingSourceV1 {
+                    load_id: "fold".into(),
+                    sha256: [22; 32],
+                },
+                orthogonality: tellus::VerifiedGroundingSourceV1 {
+                    load_id: "orthogonality".into(),
+                    sha256: [23; 32],
+                },
+            },
+            members: vec![[1; 16]],
+        }
+    }
+
+    #[test]
+    fn tellus_grounding_frontier_reproves_exact_retained_requirements() {
+        use frontier::GroundingVerificationFrontierSourceV1;
+
+        let cohort = alignment_basis("goal-v1", 67).cohort().clone();
+        let mut source = frontier::TellusGroundingFrontierSourceV1::new(
+            TellusGroundingPort {
+                result: current_grounding_result(),
+                requests: Vec::new(),
+            },
+            "product-delivery".into(),
+            cohort.clone(),
+            limits(),
+        )
+        .unwrap();
+        let observed = source
+            .current_grounding_evidence("product-delivery", &cohort, &grounding_requirements())
+            .unwrap();
+
+        assert_eq!(observed.len(), 4);
+        assert!(observed.iter().all(|evidence| evidence.owner() == "tellus"));
+        assert!(observed.iter().any(|evidence| {
+            evidence.resource() == format!("grounding/member/{}/activated", "01".repeat(16))
+                && evidence.revision() == "05".repeat(32)
+        }));
+        let port = source.into_port();
+        assert_eq!(port.requests.len(), 1);
+        assert_eq!(port.requests[0].selections[0].authority_sha256, [4; 32]);
+        assert_eq!(
+            port.requests[0].selections[0].depth,
+            tellus::GroundingDepthV1::Activated
+        );
+    }
+
+    #[test]
+    fn tellus_grounding_frontier_refuses_stale_mismatched_and_wrong_scope_results() {
+        use frontier::GroundingVerificationFrontierSourceV1;
+
+        let cohort = alignment_basis("goal-v1", 67).cohort().clone();
+        let mut stale = frontier::TellusGroundingFrontierSourceV1::new(
+            TellusGroundingPort {
+                result: tellus::GroundingVerificationV1::Stale(
+                    tellus::GroundingStaleReasonV1::SourceChanged,
+                ),
+                requests: Vec::new(),
+            },
+            "product-delivery".into(),
+            cohort.clone(),
+            limits(),
+        )
+        .unwrap();
+        assert!(matches!(
+            stale.current_grounding_evidence(
+                "product-delivery",
+                &cohort,
+                &grounding_requirements()
+            ),
+            Err(frontier::TellusGroundingFrontierReadErrorV1::Stale(
+                tellus::GroundingStaleReasonV1::SourceChanged
+            ))
+        ));
+
+        let mut mismatched_result = current_grounding_result();
+        let tellus::GroundingVerificationV1::Current { sources, .. } = &mut mismatched_result
+        else {
+            unreachable!();
+        };
+        sources.fold.sha256 = [99; 32];
+        let mut mismatched = frontier::TellusGroundingFrontierSourceV1::new(
+            TellusGroundingPort {
+                result: mismatched_result,
+                requests: Vec::new(),
+            },
+            "product-delivery".into(),
+            cohort.clone(),
+            limits(),
+        )
+        .unwrap();
+        assert!(matches!(
+            mismatched.current_grounding_evidence(
+                "product-delivery",
+                &cohort,
+                &grounding_requirements()
+            ),
+            Err(frontier::TellusGroundingFrontierReadErrorV1::InvalidResponse)
+        ));
+        assert!(matches!(
+            mismatched.current_grounding_evidence(
+                "different-scope",
+                &cohort,
+                &grounding_requirements()
+            ),
+            Err(frontier::TellusGroundingFrontierReadErrorV1::InvalidConfiguration)
+        ));
+    }
+
     struct VellumVersionTransport {
         document: vellum_protocol::WorkspaceDocumentIdV1,
         observed: Vec<vellum_protocol::CommandV1>,

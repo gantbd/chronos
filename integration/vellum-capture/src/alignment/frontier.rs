@@ -819,6 +819,173 @@ where
     }
 }
 
+pub trait GroundingVerificationFrontierSourceV1 {
+    type Error;
+
+    /// Re-prove the exact Moira-retained grounding requirements through their
+    /// current Tellus owner. A stale result is a refusal, never evidence.
+    fn current_grounding_evidence(
+        &mut self,
+        chronos_scope: &str,
+        cohort: &AlignmentCohortV1,
+        requirements: &GroundingEvidenceFrontierV1,
+    ) -> Result<Vec<OwnerEvidenceRefV1>, Self::Error>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TellusGroundingFrontierReadErrorV1<E> {
+    InvalidConfiguration,
+    Transport(E),
+    Stale(tellus::GroundingStaleReasonV1),
+    InvalidResponse,
+    Limit,
+}
+
+/// Scope- and cohort-bound Tellus verifier. The returned references are only
+/// opaque currentness material for alignment comparison; they grant no
+/// authority and do not replace Moira's retained requirements.
+pub struct TellusGroundingFrontierSourceV1<P> {
+    port: P,
+    chronos_scope: String,
+    cohort: AlignmentCohortV1,
+    limits: AlignmentLimitsV1,
+}
+
+impl<P> TellusGroundingFrontierSourceV1<P> {
+    pub fn new(
+        port: P,
+        chronos_scope: String,
+        cohort: AlignmentCohortV1,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, AlignmentErrorV1> {
+        super::validate_field(&chronos_scope, limits)?;
+        if limits.max_evidence == 0 {
+            return Err(AlignmentErrorV1::Limit);
+        }
+        Ok(Self {
+            port,
+            chronos_scope,
+            cohort,
+            limits,
+        })
+    }
+
+    pub fn into_port(self) -> P {
+        self.port
+    }
+
+    fn reference<E>(
+        &self,
+        resource: String,
+        revision: String,
+    ) -> Result<OwnerEvidenceRefV1, TellusGroundingFrontierReadErrorV1<E>> {
+        OwnerEvidenceRefV1::new("tellus".into(), resource, revision, self.limits).map_err(|error| {
+            if error == AlignmentErrorV1::Limit {
+                TellusGroundingFrontierReadErrorV1::Limit
+            } else {
+                TellusGroundingFrontierReadErrorV1::InvalidResponse
+            }
+        })
+    }
+}
+
+impl<P> GroundingVerificationFrontierSourceV1 for TellusGroundingFrontierSourceV1<P>
+where
+    P: tellus::GroundingVerificationPort,
+{
+    type Error = TellusGroundingFrontierReadErrorV1<P::Error>;
+
+    fn current_grounding_evidence(
+        &mut self,
+        chronos_scope: &str,
+        cohort: &AlignmentCohortV1,
+        requirements: &GroundingEvidenceFrontierV1,
+    ) -> Result<Vec<OwnerEvidenceRefV1>, Self::Error> {
+        if chronos_scope != self.chronos_scope || cohort != &self.cohort {
+            return Err(TellusGroundingFrontierReadErrorV1::InvalidConfiguration);
+        }
+        let selections = requirements
+            .selections
+            .iter()
+            .map(|selection| tellus::GroundingSelectionV1 {
+                member: selection.member.0,
+                authority_sha256: selection.authority_digest,
+                surface_sha256: selection.surface_digest,
+                depth: match selection.depth {
+                    moira_protocol::deliberation::SurfaceDepthV1::Ambient => {
+                        tellus::GroundingDepthV1::Ambient
+                    }
+                    moira_protocol::deliberation::SurfaceDepthV1::Activated => {
+                        tellus::GroundingDepthV1::Activated
+                    }
+                    moira_protocol::deliberation::SurfaceDepthV1::Reference => {
+                        tellus::GroundingDepthV1::Reference
+                    }
+                },
+            })
+            .collect();
+        let request = tellus::GroundingVerificationRequestV1 {
+            method_sha256: requirements.method_content_digest,
+            fold_sha256: requirements.fold_content_digest,
+            orthogonality_sha256: requirements.orthogonality_content_digest,
+            selections,
+        };
+        let (sources, members) = match self
+            .port
+            .verify_grounding(&request)
+            .map_err(TellusGroundingFrontierReadErrorV1::Transport)?
+        {
+            tellus::GroundingVerificationV1::Current { sources, members } => (sources, members),
+            tellus::GroundingVerificationV1::Stale(reason) => {
+                return Err(TellusGroundingFrontierReadErrorV1::Stale(reason));
+            }
+        };
+        if sources.method.sha256 != request.method_sha256
+            || sources.fold.sha256 != request.fold_sha256
+            || sources.orthogonality.sha256 != request.orthogonality_sha256
+            || members.len() != request.selections.len()
+            || !members
+                .iter()
+                .zip(&request.selections)
+                .all(|(member, selection)| *member == selection.member)
+        {
+            return Err(TellusGroundingFrontierReadErrorV1::InvalidResponse);
+        }
+        let required = 3usize
+            .checked_add(request.selections.len())
+            .ok_or(TellusGroundingFrontierReadErrorV1::Limit)?;
+        if required > self.limits.max_evidence {
+            return Err(TellusGroundingFrontierReadErrorV1::Limit);
+        }
+        let mut evidence = Vec::with_capacity(required);
+        for (role, source) in [
+            ("method", sources.method),
+            ("fold", sources.fold),
+            ("orthogonality", sources.orthogonality),
+        ] {
+            evidence.push(self.reference(
+                format!("grounding/source/{role}/{}", source.load_id),
+                lower_hex(&source.sha256),
+            )?);
+        }
+        for selection in &request.selections {
+            evidence.push(self.reference(
+                format!(
+                    "grounding/member/{}/{}",
+                    lower_hex(&selection.member),
+                    selection.depth.as_str()
+                ),
+                lower_hex(&selection.surface_sha256),
+            )?);
+        }
+        evidence.sort();
+        if evidence.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(TellusGroundingFrontierReadErrorV1::InvalidResponse);
+        }
+        Ok(evidence)
+    }
+}
+
 fn lower_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut value = String::with_capacity(bytes.len().saturating_mul(2));
