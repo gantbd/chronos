@@ -44,6 +44,9 @@ pub struct View {
     pub cancel_receipts: Vec<CancelReceipt>,
     pub mutation_blocked: bool,
     pub manual_refresh_required: bool,
+    /// Content-free settlement of the most recent task-graph mutation. Hosts
+    /// must consume this field rather than parse operator-facing status text.
+    pub last_task_mutation: Option<TaskMutationDisposition>,
 }
 impl Default for View {
     fn default() -> Self {
@@ -60,8 +63,16 @@ impl Default for View {
             cancel_receipts: Vec::new(),
             mutation_blocked: true,
             manual_refresh_required: false,
+            last_task_mutation: None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskMutationDisposition {
+    Applied,
+    Refused,
+    OutcomeUnknown,
 }
 
 /// Content-free client-interface RED signals. Residence includes socket and
@@ -441,6 +452,7 @@ impl<C: WireClientV1> Model<C> {
                 // known success even if this separate observation fails.
                 self.page(None);
                 self.view.status = format!("Task graph submission applied. {}", self.view.status);
+                self.view.last_task_mutation = Some(TaskMutationDisposition::Applied);
             }
             Ok(Response {
                 outcome: Outcome::Refused { failure },
@@ -448,12 +460,14 @@ impl<C: WireClientV1> Model<C> {
             }) => {
                 let status = format!("Task graph submission refused. {}", refusal(&failure));
                 self.invalidate(&status);
+                self.view.last_task_mutation = Some(TaskMutationDisposition::Refused);
             }
             _ => {
                 self.view.manual_refresh_required = true;
                 self.invalidate(
                     "Task graph submission outcome unknown. Inspect with Refresh; never automatically replay.",
                 );
+                self.view.last_task_mutation = Some(TaskMutationDisposition::OutcomeUnknown);
             }
         }
     }

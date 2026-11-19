@@ -214,6 +214,10 @@ fn lost_mutation_reply_never_retries_and_blocks_mutation_until_explicit_refresh(
     model.apply(Action::Refresh);
     model.apply(Action::Submit("c".into()));
     assert!(model.view.status.contains("unknown"));
+    assert_eq!(
+        model.view.last_task_mutation,
+        Some(chronos_model::TaskMutationDisposition::OutcomeUnknown)
+    );
     assert!(model.view.mutation_blocked);
     model.apply(Action::RefreshKeepingSelection);
     assert!(model.view.manual_refresh_required);
@@ -248,6 +252,10 @@ fn known_applied_mutation_stays_known_when_followup_read_fails() {
             .status
             .starts_with("Task graph submission applied.")
     );
+    assert_eq!(
+        model.view.last_task_mutation,
+        Some(chronos_model::TaskMutationDisposition::Applied)
+    );
     assert!(model.view.mutation_blocked);
 }
 
@@ -274,6 +282,10 @@ fn graph_submission_replaces_stale_cancel_receipts_and_names_unknown_dependency(
             .view
             .status
             .starts_with("Task graph submission refused.")
+    );
+    assert_eq!(
+        model.view.last_task_mutation,
+        Some(chronos_model::TaskMutationDisposition::Refused)
     );
     assert!(model.view.status.contains("exact dependency"));
     assert!(model.view.mutation_blocked);
