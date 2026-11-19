@@ -193,14 +193,31 @@ request; Moira reconnects per deliberation read while registry revisions bracket
 the aggregate; Tellus requires a loopback endpoint and bearer token; and the
 goal and policy each get an independently authenticated Vellum client loaded
 from the private credential store. Paths must be absolute, time/frame bounds are
-finite, ordinary debug output is redacted, and the resulting type still exposes
-only the twice-sampled read frontier. A process-separated all-owner live gate,
-composition-root configuration and recurring PM worker remain open. A bounded
-runtime wrapper now binds that frontier and caller-supplied disclosure policy to
-the existing independently owned alignment listener, serves one request or an
-OS-readiness-driven loop, and leaves signal installation plus the exact shutdown
-channel with the composition root. Live document binding no longer requires a persisted
-process-local ID: the locator-backed reader uses Vellum's existing exact
+finite, ordinary debug output is redacted, and every short-lived Vellum client
+explicitly disconnects so repeated frontier reads cannot consume the owner's
+bounded client capacity. The resulting type still exposes only the twice-sampled
+read frontier. A bounded runtime wrapper binds that frontier and caller-supplied
+disclosure policy to the existing independently owned alignment listener, serves
+one request or an OS-readiness-driven loop, and leaves signal installation plus
+the exact shutdown channel with the composition root.
+
+`chronos-product-alignment-local` is the first bounded composition root. It
+loads only explicit absolute owner bindings and private credential/token files,
+resolves the goal and proposal through Vellum, samples every owner twice, and
+creates or reopens only the exact same immutable PM proposal before serving one
+public read-only observation. A different retained proposal, unavailable owner,
+unstable sample or disclosure refusal stops activation. It never admits or
+changes a task. `chronos-alignment-control-admit` is a deliberately separate
+one-purpose authority surface for admitting the exact control task through
+Chronos's public mutation protocol. The process-separated live gate exercised
+current Vellum, Chronos, Moira and authenticated Tellus/Dendrite processes; its
+public observation preserved task incarnation zero, three distinct stakeholder
+principals, the full owner evidence frontier, a pending human gate and the PM's
+`EscalateHuman` recommendation. Recurring/coalesced PM activation, Agora
+challenge and separately authorized proposal application remain open.
+
+Live document binding no longer requires a persisted process-local ID: the
+locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
 Its evidence token includes the live workspace identity, document identity and
 revision, so a locator rebind with the same revision and byte length still
