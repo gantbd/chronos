@@ -1538,6 +1538,118 @@ mod tests {
         ));
     }
 
+    struct VellumLocatorTransport {
+        workspace: vellum_protocol::WorkspaceIdV1,
+        documents: std::collections::VecDeque<vellum_protocol::WorkspaceDocumentIdV1>,
+        resolved: Option<vellum_protocol::WorkspaceDocumentIdV1>,
+        observed: Vec<vellum_protocol::CommandV1>,
+    }
+
+    impl vellum_protocol::ServicePort for VellumLocatorTransport {
+        fn connect(
+            &mut self,
+        ) -> Result<vellum_protocol::ClientId, vellum_protocol::ServiceControlErrorV1> {
+            Ok(vellum_protocol::ClientId::new(8).unwrap())
+        }
+
+        fn execute(
+            &mut self,
+            request: vellum_protocol::RequestV1,
+        ) -> Result<vellum_protocol::ReplyV1, vellum_protocol::ServiceAccessErrorV1> {
+            use vellum_protocol::{OutcomeV1, ReplyV1};
+
+            let reply = match &request.command {
+                vellum_protocol::CommandV1::ResolveLocator { locator }
+                    if locator == "/workspace/docs/goal.md" =>
+                {
+                    let document = self.documents.pop_front().unwrap();
+                    self.resolved = Some(document);
+                    ReplyV1::Accepted(OutcomeV1::LocatorResolved(
+                        vellum_protocol::WorkspaceLocatorResolutionV1 {
+                            workspace: self.workspace,
+                            document: Some(document),
+                            root: None,
+                        },
+                    ))
+                }
+                vellum_protocol::CommandV1::ObserveDocumentVersion { document }
+                    if Some(*document) == self.resolved =>
+                {
+                    ReplyV1::Accepted(OutcomeV1::DocumentVersionObserved(
+                        vellum_protocol::DocumentVersionObservationV1 {
+                            document: *document,
+                            revision: 9,
+                            byte_length: 144,
+                        },
+                    ))
+                }
+                _ => panic!("locator goal reader issued an unexpected Vellum command"),
+            };
+            self.observed.push(request.command);
+            Ok(reply)
+        }
+
+        fn disconnect(
+            &mut self,
+            _: vellum_protocol::ClientId,
+        ) -> Result<(), vellum_protocol::ServiceControlErrorV1> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn vellum_locator_goal_reader_resolves_current_membership_and_detects_rebinding() {
+        use frontier::GoalFrontierSourceV1;
+        use vellum_host::annotation::{DocumentIdentity, SourceEvidence, Target};
+
+        let workspace = vellum_protocol::WorkspaceIdV1::new(3).unwrap();
+        let first = vellum_protocol::WorkspaceDocumentIdV1::new(workspace, 5).unwrap();
+        let second = vellum_protocol::WorkspaceDocumentIdV1::new(workspace, 6).unwrap();
+        let client = vellum_client::Client::connect(VellumLocatorTransport {
+            workspace,
+            documents: [first, second].into(),
+            resolved: None,
+            observed: Vec::new(),
+        })
+        .unwrap();
+        let mut source = frontier::VellumLocatorGoalFrontierSourceV1::new(
+            client,
+            "/workspace/docs/goal.md".into(),
+            "vellum-workspace".into(),
+            "delivery-goal".into(),
+        )
+        .unwrap();
+        let retained = SourceReferenceV1 {
+            document: DocumentIdentity {
+                namespace: "vellum-workspace".into(),
+                value: "delivery-goal".into(),
+            },
+            target: Target::Document {
+                source: SourceEvidence {
+                    domain: frontier::VELLUM_WORKSPACE_LOCATOR_BINDING_REVISION_DOMAIN_V1.into(),
+                    token: "3.4.8".into(),
+                    byte_length: 128,
+                },
+            },
+        };
+        let before_rebind = source.current_goal(&retained).unwrap();
+        let after_rebind = source.current_goal(&retained).unwrap();
+        assert_eq!(before_rebind.target.source().token, "3.5.9");
+        assert_eq!(after_rebind.target.source().token, "3.6.9");
+        assert_ne!(before_rebind, after_rebind);
+        assert_eq!(after_rebind.target.source().byte_length, 144);
+        let transport = source.into_client().into_transport();
+        assert!(matches!(
+            transport.observed.as_slice(),
+            [
+                vellum_protocol::CommandV1::ResolveLocator { .. },
+                vellum_protocol::CommandV1::ObserveDocumentVersion { document: observed_first },
+                vellum_protocol::CommandV1::ResolveLocator { .. },
+                vellum_protocol::CommandV1::ObserveDocumentVersion { document: observed_second }
+            ] if *observed_first == first && *observed_second == second
+        ));
+    }
+
     #[test]
     fn proposal_cannot_impersonate_the_pm_or_hide_required_next_work() {
         let basis = alignment_basis("goal-v1", 66);

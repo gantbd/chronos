@@ -158,10 +158,17 @@ change, reopen-required state, a contested/non-admitted ensemble, missing bound
 stakeholders, scope drift, or retained-cohort drift. It never infers a PM,
 advocate, or supervisor from persona lens, model, provider, or member order.
 Complete evidence-owner reading, including an owner-supported classification of
-which observed dissent remains unresolved, live document binding resolution,
-and the packaged production composition remain open; no static retained
-proposal or conservative relabeling of every dissent digest may masquerade as
-the current frontier.
+which observed dissent remains unresolved, and the packaged production
+composition remain open. Live document binding no longer requires a persisted
+process-local ID: the locator-backed reader uses Vellum's existing exact
+`ResolveLocator` join on every sample and then observes that document version.
+Its evidence token includes the live workspace identity, document identity and
+revision, so a locator rebind with the same revision and byte length still
+invalidates the proposal; a service restart conservatively does the same. The
+configured locator never enters the alignment record, and neither resolution
+nor observation selects a human view. No static retained proposal or
+conservative relabeling of every dissent digest may masquerade as the current
+frontier.
 
 ## Independent text handoff
 

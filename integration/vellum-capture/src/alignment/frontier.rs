@@ -12,6 +12,8 @@ use chronos_sdk_embedded::engine::{RevisionedTaskSnapshotV1, TaskRefV1};
 use vellum_host::annotation::{SourceEvidence, Target};
 
 pub const VELLUM_WORKSPACE_SOURCE_REVISION_DOMAIN_V1: &str = "vellum-workspace-source-revision-v1";
+pub const VELLUM_WORKSPACE_LOCATOR_BINDING_REVISION_DOMAIN_V1: &str =
+    "vellum-workspace-locator-binding-revision-v1";
 
 #[derive(Debug)]
 pub enum VellumGoalReadErrorV1 {
@@ -93,34 +95,147 @@ where
             ReplyV1::Accepted(_) => return Err(VellumGoalReadErrorV1::InvalidResponse),
             ReplyV1::Refused(refusal) => return Err(VellumGoalReadErrorV1::Refused(refusal)),
         };
-        let source = SourceEvidence {
-            domain: VELLUM_WORKSPACE_SOURCE_REVISION_DOMAIN_V1.into(),
-            token: observation.revision.to_string(),
-            byte_length: observation.byte_length,
-        };
-        let target = match &retained.target {
-            Target::Document { .. } => Target::Document { source },
-            Target::Point {
-                offset,
-                affinity,
-                profile,
-                ..
-            } => Target::Point {
-                source,
-                offset: *offset,
-                affinity: *affinity,
-                profile: *profile,
+        Ok(with_source_evidence(
+            retained,
+            SourceEvidence {
+                domain: VELLUM_WORKSPACE_SOURCE_REVISION_DOMAIN_V1.into(),
+                token: observation.revision.to_string(),
+                byte_length: observation.byte_length,
             },
-            Target::Range { start, end, .. } => Target::Range {
-                source,
-                start: *start,
-                end: *end,
-            },
-        };
-        Ok(SourceReferenceV1 {
-            document: retained.document.clone(),
-            target,
+        ))
+    }
+}
+
+/// Vellum-backed goal reader that resolves one explicitly configured absolute
+/// locator against current workspace membership for every observation. The
+/// locator is configuration and is never retained in the alignment record.
+/// Live owner identities are evidence only: a rebind or service restart makes
+/// an older proposal stale instead of being mistaken for the same source.
+pub struct VellumLocatorGoalFrontierSourceV1<T> {
+    client: vellum_client::Client<T>,
+    locator: String,
+    namespace: String,
+    identity: String,
+}
+
+impl<T> VellumLocatorGoalFrontierSourceV1<T>
+where
+    T: vellum_protocol::ServicePort,
+{
+    pub fn new(
+        client: vellum_client::Client<T>,
+        locator: String,
+        namespace: String,
+        identity: String,
+    ) -> Result<Self, VellumGoalReadErrorV1> {
+        if locator.is_empty()
+            || namespace.is_empty()
+            || identity.is_empty()
+            || locator.chars().any(char::is_control)
+            || namespace.chars().any(char::is_control)
+            || identity.chars().any(char::is_control)
+        {
+            return Err(VellumGoalReadErrorV1::InvalidConfiguration);
+        }
+        Ok(Self {
+            client,
+            locator,
+            namespace,
+            identity,
         })
+    }
+
+    pub fn into_client(self) -> vellum_client::Client<T> {
+        self.client
+    }
+}
+
+impl<T> GoalFrontierSourceV1 for VellumLocatorGoalFrontierSourceV1<T>
+where
+    T: vellum_protocol::ServicePort,
+{
+    type Error = VellumGoalReadErrorV1;
+
+    fn current_goal(
+        &mut self,
+        retained: &SourceReferenceV1,
+    ) -> Result<SourceReferenceV1, Self::Error> {
+        use vellum_protocol::{OutcomeV1, ReplyV1};
+
+        let retained_evidence = retained.target.source();
+        if retained.document.namespace != self.namespace
+            || retained.document.value != self.identity
+            || retained_evidence.domain != VELLUM_WORKSPACE_LOCATOR_BINDING_REVISION_DOMAIN_V1
+        {
+            return Err(VellumGoalReadErrorV1::InvalidConfiguration);
+        }
+        let resolution = match self
+            .client
+            .resolve_locator(self.locator.clone())
+            .map_err(VellumGoalReadErrorV1::Access)?
+        {
+            ReplyV1::Accepted(OutcomeV1::LocatorResolved(resolution)) => resolution,
+            ReplyV1::Accepted(_) => return Err(VellumGoalReadErrorV1::InvalidResponse),
+            ReplyV1::Refused(refusal) => return Err(VellumGoalReadErrorV1::Refused(refusal)),
+        };
+        let document = resolution
+            .document
+            .ok_or(VellumGoalReadErrorV1::InvalidResponse)?;
+        if document.workspace() != resolution.workspace {
+            return Err(VellumGoalReadErrorV1::InvalidResponse);
+        }
+        let observation = match self
+            .client
+            .observe_document_version(document)
+            .map_err(VellumGoalReadErrorV1::Access)?
+        {
+            ReplyV1::Accepted(OutcomeV1::DocumentVersionObserved(observation))
+                if observation.document == document =>
+            {
+                observation
+            }
+            ReplyV1::Accepted(_) => return Err(VellumGoalReadErrorV1::InvalidResponse),
+            ReplyV1::Refused(refusal) => return Err(VellumGoalReadErrorV1::Refused(refusal)),
+        };
+        Ok(with_source_evidence(
+            retained,
+            SourceEvidence {
+                domain: VELLUM_WORKSPACE_LOCATOR_BINDING_REVISION_DOMAIN_V1.into(),
+                token: format!(
+                    "{}.{}.{}",
+                    document.workspace().get(),
+                    document.get(),
+                    observation.revision
+                ),
+                byte_length: observation.byte_length,
+            },
+        ))
+    }
+}
+
+fn with_source_evidence(retained: &SourceReferenceV1, source: SourceEvidence) -> SourceReferenceV1 {
+    let target = match &retained.target {
+        Target::Document { .. } => Target::Document { source },
+        Target::Point {
+            offset,
+            affinity,
+            profile,
+            ..
+        } => Target::Point {
+            source,
+            offset: *offset,
+            affinity: *affinity,
+            profile: *profile,
+        },
+        Target::Range { start, end, .. } => Target::Range {
+            source,
+            start: *start,
+            end: *end,
+        },
+    };
+    SourceReferenceV1 {
+        document: retained.document.clone(),
+        target,
     }
 }
 
