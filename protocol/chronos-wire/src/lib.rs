@@ -117,6 +117,7 @@ pub fn decode_response_v2(
 
 /// Strict version dispatch without falling back from a malformed profile.
 pub enum ProfileRequest {
+    WorkflowV9(workflow_v9::Request),
     ScheduledCancellationV8(coordination_v8::Request),
     ScheduledAdmissionV7(coordination_v7::Request),
     DependenciesV6(dependencies_v6::Request),
@@ -129,6 +130,7 @@ pub enum ProfileRequest {
 #[derive(Serialize)]
 #[serde(untagged)]
 pub enum ProfileResponse {
+    WorkflowV9(workflow_v9::Response),
     ScheduledCancellationV8(coordination_v8::Response),
     ScheduledAdmissionV7(coordination_v7::Response),
     DependenciesV6(dependencies_v6::Response),
@@ -140,6 +142,7 @@ pub enum ProfileResponse {
 }
 pub fn decode_profile(bytes: &[u8], limits: Limits) -> Result<ProfileRequest, CodecError> {
     match request_version(bytes, limits.max_frame_bytes)? {
+        9 => decode_request_v9(bytes, limits).map(ProfileRequest::WorkflowV9),
         8 => decode_request_v8(bytes, limits).map(ProfileRequest::ScheduledCancellationV8),
         7 => decode_request_v7(bytes, limits).map(ProfileRequest::ScheduledAdmissionV7),
         6 => {
@@ -162,6 +165,19 @@ pub fn decode_profile(bytes: &[u8], limits: Limits) -> Result<ProfileRequest, Co
 /// its command is invalid. Unknown/ambiguous envelopes retain the legacy V1
 /// generic refusal. No input content is reflected in the response.
 pub fn profile_refusal(bytes: &[u8], limits: Limits, error: CodecError) -> ProfileResponse {
+    if request_version(bytes, limits.max_frame_bytes) == Ok(9) {
+        return ProfileResponse::WorkflowV9(workflow_v9::Response {
+            version: 9,
+            outcome: workflow_v9::Outcome::Refused {
+                code: match error {
+                    CodecError::Limit => workflow_v9::RefusalCode::Limit,
+                    CodecError::Capacity => workflow_v9::RefusalCode::Capacity,
+                    CodecError::Version => workflow_v9::RefusalCode::UnsupportedVersion,
+                    CodecError::Malformed => workflow_v9::RefusalCode::InvalidRequest,
+                },
+            },
+        });
+    }
     if request_version(bytes, limits.max_frame_bytes) == Ok(8) {
         return ProfileResponse::ScheduledCancellationV8(coordination_v8::Response {
             version: 8,
@@ -299,6 +315,30 @@ pub fn decode_request_v8(
         serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
     request.validate(limits)?;
     Ok(request)
+}
+
+pub fn decode_request_v9(bytes: &[u8], limits: Limits) -> Result<workflow_v9::Request, CodecError> {
+    if bytes.len() > limits.max_frame_bytes {
+        return Err(CodecError::Limit);
+    }
+    let request: workflow_v9::Request =
+        serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
+    request.validate(limits)?;
+    Ok(request)
+}
+
+pub fn decode_response_v9(
+    bytes: &[u8],
+    max_bytes: usize,
+    limits: Limits,
+) -> Result<workflow_v9::Response, CodecError> {
+    if bytes.len() > max_bytes {
+        return Err(CodecError::Limit);
+    }
+    let response: workflow_v9::Response =
+        serde_json::from_slice(bytes).map_err(|_| CodecError::Malformed)?;
+    response.validate(limits)?;
+    Ok(response)
 }
 
 pub fn decode_response_v8(

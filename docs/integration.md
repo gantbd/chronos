@@ -503,6 +503,18 @@ remains available through the protocol/MCP rather than being guessed from text.
 Task IDs are limited to 256 UTF-8 bytes and displayed with literal escapes to
 avoid terminal-control and invisible-format injection; identity is not changed.
 
+### Authoritative workflow observation V9
+
+`protocol::workflow_v9`, `client::WorkflowWireClientV9`, the native adapter,
+local Unix transport, and standalone daemon expose bounded `Snapshot` and
+`Page` observations of Chronos's one task status. The six values are `backlog`,
+`open`, `blocked`, `in_progress`, `ready_for_review`, and `done`. A blocked task
+always carries a structured blocker and resume destination. `execution_phase`
+is explicitly diagnostic evidence; clients must not relabel or group it as task
+status. V9 is read-only and leaves the closed V1 profile unchanged. Guarded
+status mutation is a separate future profile rather than an implicit extension
+of this observation contract.
+
 The TUI owns its keybindings (`r`, `]`, arrows, `n`, `c`, `y`, Escape, `q`);
 the GUI owns buttons, text entry and window lifecycle. Neither application owns
 task state or starts agents. Each instance has independent selection, page and

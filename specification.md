@@ -22,6 +22,26 @@ without transferring its lease. These are attribution values, not a durable
 inbox or idempotency implementation; matching replay is owned by Moira/Hermes
 adapter state as specified in `docs/federation-integration-v1.md`.
 
+## Authoritative task status
+
+Every retained task has one authoritative status shared by human and agent
+consumers: `Backlog`, `Open`, `Blocked`, `InProgress`, `ReadyForReview`, or
+`Done`. Claims, leases, attempts, dependency readiness, uncertain effects and
+provider outcomes are execution facts that constrain or cause status
+transitions; they are not another status machine.
+
+Admission publishes `Open` when work is schedulable and `Blocked` with a
+structured blocker when dependencies remain. Only `Open` work is claimable. A
+claim publishes `InProgress`; retryable failure returns to `Open`; terminal
+failure publishes `Blocked`; successful execution publishes
+`ReadyForReview`. `Done` is reached only through an explicit exact status
+transition after successful execution. `Blocked` always carries a blocker and
+an explicit non-`Blocked`, non-`Done` resume destination.
+
+The read-only wire V9 profile projects that status and blocker alongside an
+explicitly named execution phase for diagnostics. It does not reinterpret the
+closed V1 phase profile.
+
 `TaskSpecV2` is the V2 admission carrier. It contains descriptive ID, priority,
 dependency IDs, required scheduling capabilities, attempt ceiling, and the
 closed retry-safety class. It carries no work summary, document locator, raw
@@ -84,12 +104,12 @@ and frozen V2 command-kind tags. `CommandJournalV2<N>` proves pending capacity
 and sequence availability before executing a command and uses the same monotone
 prefix acknowledgement contract as V1. It remains an in-memory outbox.
 
-Checkpoint V2 is the current canonical encoder. In addition to V1 state, it
-persists next task incarnation, task-state revision, and the monotone time
-floor/sequence. The decoder accepts both V1 and V2. V1 recovery deterministically
+Checkpoint V4 is the current canonical encoder. In addition to prior state, it
+persists the authoritative status, blocker, and optional scheduling controls.
+The decoder accepts V1 through V4. V1 recovery deterministically
 assigns its never-retired tasks migration incarnations in canonical task order
 and places the next high-water mark after them. Immutable minimal fixtures cover
-both versions. Grant, lease, and time-observation authority are never serialized.
+released versions. Grant, lease, and time-observation authority are never serialized.
 
 ## Engine boundary
 

@@ -4,8 +4,8 @@ Chronos is a Rust scheduling engine for agents that need to share work safely.
 It is a library, not an application: user interfaces, agent connectors, storage,
 and transports live outside the engine.
 
-The v0.3 engine retains the v0.2 coordination semantics and canonical checkpoint
-V1/V2 formats, with Rust 1.95 as its minimum toolchain. This is an intentional
+The v0.3 engine retains the v0.2 coordination semantics and decodes canonical
+checkpoint V1 through V4 formats, with Rust 1.95 as its minimum toolchain. This is an intentional
 API boundary change: storage ports and concrete checkpoint adapters are no
 longer exported by `chronos-engine`. See [migration](docs/migration-0.3.md).
 
@@ -34,7 +34,7 @@ The first engine slice provides:
 - immediate lease-authorized uncertain-effect relinquishment;
 - ownership-sealed V1/V2 prepared durable transitions;
 - distinct closed `CommandV2`, `AuditRecordV2`, and bounded V2 journal profiles;
-- canonical checkpoint V2 with continued V1 decoding and immutable fixtures;
+- canonical checkpoint V4 with continued V1/V2/V3 decoding and immutable fixtures;
 - content-minimized V2 task/failure inputs for Vellum/chat-backed deployments.
 - an initial federation adapter profile with attributable graph receipts and
   stable authority-free task-attempt references.
@@ -76,6 +76,12 @@ original allocation when receipt capture is enabled.
 The separate V8 profile applies the same retained/scoped-reconciliation pattern
 to exact-reference cancellation. It proves Chronos cancellation only; it makes
 no claim about effects another peer may already have accepted.
+The read-only V9 workflow profile exposes the single authoritative task status:
+`backlog`, `open`, `blocked`, `in_progress`, `ready_for_review`, or `done`.
+Structured blocker evidence accompanies `blocked`; lease, attempt, readiness and
+execution phase remain subordinate diagnostics and never form a second task
+status. V1 remains unchanged for compatibility while presentation clients move
+to V9.
 The initial local profile is not per-agent or remote credential authentication.
 Standalone startup durably initializes only with first-created writer-lock
 provenance; missing state under an existing lock refuses instead of resetting.

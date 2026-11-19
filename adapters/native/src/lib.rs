@@ -6,6 +6,7 @@ pub mod coordination_v4;
 pub mod coordination_v7;
 pub mod coordination_v8;
 pub mod scheduling_v5;
+pub mod workflow_v9;
 #[derive(Debug)]
 pub enum EmbeddedError<E> {
     Request(chronos_wire::CodecError),

@@ -2,6 +2,14 @@
 #![forbid(unsafe_code)]
 pub mod observer;
 pub mod workbench;
+/// Read-only authoritative workflow status. Execution phase is diagnostic only.
+pub trait WorkflowWireClientV9 {
+    type Error;
+    fn request_workflow_v9(
+        &mut self,
+        request: chronos_protocol::workflow_v9::Request,
+    ) -> Result<chronos_protocol::workflow_v9::Response, Self::Error>;
+}
 /// Read-only product alignment observation. No control method is paired with it.
 pub trait AlignmentWireClientV1 {
     type Error;

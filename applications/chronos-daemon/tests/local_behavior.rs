@@ -67,6 +67,67 @@ impl Running {
 }
 
 #[test]
+fn workflow_v9_exposes_authoritative_status_over_the_real_local_transport() {
+    use chronos_client::WorkflowWireClientV9;
+    use chronos_wire::workflow_v9 as v9;
+
+    let directory = Directory::new();
+    let _server = Running::start(&directory.0, true);
+    let mut client = LocalClient::new(&directory.0);
+    let submitted = client
+        .request(Request {
+            version: 1,
+            command: Command::SubmitGraph {
+                expected: Revision::Finite("0".into()),
+                tasks: vec![
+                    TaskSpec {
+                        id: "root".into(),
+                        priority: 0,
+                        dependencies: vec![],
+                        capabilities: vec![],
+                        max_attempts: 3,
+                        retry_safety: RetrySafety::FenceUnknown,
+                    },
+                    TaskSpec {
+                        id: "dependent".into(),
+                        priority: 0,
+                        dependencies: vec!["root".into()],
+                        capabilities: vec![],
+                        max_attempts: 3,
+                        retry_safety: RetrySafety::FenceUnknown,
+                    },
+                ],
+            },
+        })
+        .unwrap();
+    assert!(matches!(submitted.outcome, Outcome::Applied {}));
+
+    let response = client
+        .request_workflow_v9(v9::Request {
+            version: 9,
+            command: v9::Command::Page {
+                cursor: None,
+                limit: 4,
+            },
+        })
+        .unwrap();
+    let v9::Outcome::Page { entries, .. } = response.outcome else {
+        panic!("expected workflow page")
+    };
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].snapshot.status, v9::Status::Blocked);
+    assert_eq!(
+        entries[0].snapshot.blocker.as_ref().unwrap().kind,
+        v9::BlockerKind::Dependency
+    );
+    assert_eq!(entries[1].snapshot.status, v9::Status::Open);
+    assert_eq!(
+        entries[1].snapshot.execution_phase,
+        v9::ExecutionPhase::Ready
+    );
+}
+
+#[test]
 fn atomic_wire_lost_reply_lookup_replay_and_read_only_restart_use_one_committed_invocation() {
     use chronos_client::WireClientV3;
     use chronos_wire::coordination_v3 as v3;
