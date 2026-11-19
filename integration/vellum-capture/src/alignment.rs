@@ -11,6 +11,7 @@ use keystone_storage::{CommitGate, CommitOutcome, Revision};
 use vellum_host::annotation::Target;
 
 mod codec;
+pub mod dual_frontier;
 pub mod frontier;
 pub mod host;
 pub mod journal;
@@ -928,7 +929,7 @@ mod tests {
         PrincipalRefV1::new(value.into(), limits()).unwrap()
     }
 
-    fn source(token: &str) -> SourceReferenceV1 {
+    pub(super) fn source(token: &str) -> SourceReferenceV1 {
         SourceReferenceV1 {
             document: DocumentIdentity {
                 namespace: "vellum-workspace".into(),

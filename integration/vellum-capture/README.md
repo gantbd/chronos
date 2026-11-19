@@ -226,6 +226,19 @@ a finite headless run against the same process, then returned a distinct clean
 `chronos-alignment` lifecycle receipt. Supervision adds availability, not a
 timer, event subscription, proposal rewrite or task authority.
 
+The dual-frontier reconciliation contract gives the PM a content-free shape
+for comparing an external frontier supervisor with a separately attributed,
+Pantheon-constrained worker against the same exact alignment basis. Each
+worker position retains only owner-supplied Chronos task, attempt, lease,
+contribution and evidence references. PM conflicts must resolve to those
+references or the sampled alignment evidence; a human escalation must name an
+exact pending gate from that basis. The contract refuses role collapse, an
+attempt or lease without an exact task observation, false `Aligned` judgment
+in the presence of conflict/gate evidence, and invented conflict or gate
+strings. It has no mutation or acceptance method. Durable codec/journal,
+owner readers, public projection, recurring/coalesced activation, attributed
+Agora challenge and separately authorized proposal application remain open.
+
 Live document binding no longer requires a persisted process-local ID: the
 locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
