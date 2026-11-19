@@ -231,6 +231,7 @@ dependencies = [
  "pantheon",
  "rustix",
  "vellum-adapter-local-fs",
+ "vellum-client",
  "vellum-engine",
  "vellum-host",
  "vellum-protocol",

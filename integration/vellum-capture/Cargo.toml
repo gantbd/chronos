@@ -21,6 +21,8 @@ chronos-wire = { path = "../../protocol/chronos-wire", version = "=0.1.0" }
 chronos-sdk-embedded = { path = "../../sdk/embedded", version = "=0.1.0" }
 vellum-workspace = { path = "../../../vellum/host/vellum-workspace", version = "=0.1.0" }
 vellum-host = { path = "../../../vellum/host/vellum-host", version = "=0.1.0" }
+vellum-client = { path = "../../../vellum/client/vellum-client", version = "=0.1.0" }
+vellum-protocol = { path = "../../../vellum/protocol/vellum-protocol", version = "=0.1.0" }
 keystone-storage = { path = "../../third_party/keystone-storage-0.0.1", version = "=0.0.1-chronos.1" }
 keystone-observe = { path = "../../../keystone/crates/keystone-observe", version = "=0.0.1" }
 chronos-adapter-checkpoint = { path = "../../adapters/checkpoint", version = "=0.1.0" }
@@ -37,7 +39,6 @@ chronos-local = { path = "../../transport/chronos-local", version = "=0.1.0", op
 vellum-adapter-local-fs = { path = "../../../vellum/adapters/local-fs", version = "=0.1.0", optional = true }
 chronos-tui = { path = "../../../chronos-tui", version = "=0.1.0", optional = true }
 pantheon = { path = "../../../pantheon", version = "=0.1.0", optional = true }
-vellum-protocol = { path = "../../../vellum/protocol/vellum-protocol", version = "=0.1.0" }
 vellum-service = { path = "../../../vellum/service/vellum-service", version = "=0.1.0" }
 
 [target.'cfg(unix)'.dev-dependencies]

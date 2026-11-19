@@ -138,9 +138,22 @@ accept/shutdown, clean identity-checked removal, and content-free saturation-
 aware signals. A real local test binds the endpoint, observes through the public
 verified client, drains, removes, restarts through simulated crash residue, and
 proves an old owner cannot delete a replacement endpoint. The composition root
-still owns signal installation. A packaged process and live frontier adapter
-that re-read exact Chronos, Vellum and evidence-owner state remain open; no
-static retained proposal may masquerade as that current frontier.
+still owns signal installation.
+
+The live-frontier composition now makes fresh multi-owner reads executable. A
+retained basis is used only as an exact selector. Every observation reads the
+Vellum goal, Chronos control task, stakeholder cohort and complete discoverable
+evidence/dissent/human-gate frontier twice; unequal samples refuse as unstable.
+Newly raised dissent and gates therefore need not appear in the old proposal
+before they can invalidate it. The concrete Chronos reader uses one exact task
+snapshot request and rejects task-name reuse with a different incarnation. The
+concrete Vellum reader binds a host-configured stable document identity to one
+authorized live workspace document and consumes only `ObserveDocumentVersion`;
+the closed `vellum-workspace-source-revision-v1` evidence domain carries its
+revision and byte length without selecting a view or copying source text.
+Concrete cohort and evidence-owner readers, live document binding resolution,
+and the packaged production composition remain open; no static retained
+proposal may masquerade as the current frontier.
 
 ## Independent text handoff
 

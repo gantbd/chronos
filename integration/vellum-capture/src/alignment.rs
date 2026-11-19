@@ -11,6 +11,7 @@ use keystone_storage::{CommitGate, CommitOutcome, Revision};
 use vellum_host::annotation::Target;
 
 mod codec;
+pub mod frontier;
 pub mod host;
 pub mod journal;
 #[cfg(unix)]
@@ -1019,6 +1020,329 @@ mod tests {
             proposal.currentness(&changed),
             ProposalCurrentnessV1::EvidenceChanged
         );
+    }
+
+    #[derive(Clone)]
+    struct GoalSource {
+        values: std::collections::VecDeque<SourceReferenceV1>,
+        calls: usize,
+    }
+
+    impl frontier::GoalFrontierSourceV1 for GoalSource {
+        type Error = ();
+
+        fn current_goal(
+            &mut self,
+            _: &SourceReferenceV1,
+        ) -> Result<SourceReferenceV1, Self::Error> {
+            self.calls += 1;
+            self.values.pop_front().ok_or(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct TaskSource {
+        value: RevisionedTaskSnapshotV1,
+        calls: usize,
+    }
+
+    impl frontier::ControlTaskFrontierSourceV1 for TaskSource {
+        type Error = ();
+
+        fn current_task(
+            &mut self,
+            _: &str,
+            _: &TaskRefV1,
+        ) -> Result<RevisionedTaskSnapshotV1, Self::Error> {
+            self.calls += 1;
+            Ok(self.value.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct CohortSource {
+        value: AlignmentCohortV1,
+        calls: usize,
+    }
+
+    impl frontier::CohortFrontierSourceV1 for CohortSource {
+        type Error = ();
+
+        fn current_cohort(
+            &mut self,
+            _: &str,
+            _: &AlignmentCohortV1,
+        ) -> Result<AlignmentCohortV1, Self::Error> {
+            self.calls += 1;
+            Ok(self.value.clone())
+        }
+    }
+
+    #[derive(Clone)]
+    struct EvidenceSource {
+        value: frontier::EvidenceFrontierV1,
+        calls: usize,
+    }
+
+    impl frontier::EvidenceFrontierSourceV1 for EvidenceSource {
+        type Error = ();
+
+        fn current_evidence(
+            &mut self,
+            _: &str,
+            _: &AlignmentCohortV1,
+        ) -> Result<frontier::EvidenceFrontierV1, Self::Error> {
+            self.calls += 1;
+            Ok(self.value.clone())
+        }
+    }
+
+    fn evidence_snapshot(basis: &AlignmentBasisV1) -> frontier::EvidenceFrontierV1 {
+        frontier::EvidenceFrontierV1 {
+            budget_policy: basis.budget_policy().clone(),
+            evidence_frontier: basis.evidence_frontier().to_vec(),
+            unresolved_dissent: basis.unresolved_dissent().to_vec(),
+            pending_human_gates: basis.pending_human_gates().to_vec(),
+        }
+    }
+
+    fn live_frontier(
+        retained: &AlignmentBasisV1,
+        goals: Vec<SourceReferenceV1>,
+        evidence: frontier::EvidenceFrontierV1,
+    ) -> frontier::LiveAlignmentFrontierV1<GoalSource, TaskSource, CohortSource, EvidenceSource>
+    {
+        frontier::LiveAlignmentFrontierV1::new(
+            retained.clone(),
+            GoalSource {
+                values: goals.into(),
+                calls: 0,
+            },
+            TaskSource {
+                value: retained.control_task().clone(),
+                calls: 0,
+            },
+            CohortSource {
+                value: retained.cohort().clone(),
+                calls: 0,
+            },
+            EvidenceSource {
+                value: evidence,
+                calls: 0,
+            },
+            limits(),
+        )
+    }
+
+    #[test]
+    fn live_frontier_requires_two_stable_reads_from_every_owner_plane() {
+        use host::AlignmentFrontierV1;
+
+        let retained = alignment_basis("goal-v1", 66);
+        let mut frontier = live_frontier(
+            &retained,
+            vec![retained.goal().clone(), retained.goal().clone()],
+            evidence_snapshot(&retained),
+        );
+        assert_eq!(frontier.current("product-delivery").unwrap(), retained);
+        let (_, goal, task, cohort, evidence) = frontier.into_parts();
+        assert_eq!(goal.calls, 2);
+        assert_eq!(task.calls, 2);
+        assert_eq!(cohort.calls, 2);
+        assert_eq!(evidence.calls, 2);
+    }
+
+    #[test]
+    fn live_frontier_refuses_drift_and_discovers_new_owner_evidence() {
+        use host::AlignmentFrontierV1;
+
+        let retained = alignment_basis("goal-v1", 66);
+        let changed = alignment_basis("goal-v2", 66);
+        let mut unstable = live_frontier(
+            &retained,
+            vec![retained.goal().clone(), changed.goal().clone()],
+            evidence_snapshot(&retained),
+        );
+        assert_eq!(
+            unstable.current("product-delivery"),
+            Err(frontier::LiveFrontierErrorV1::Unstable)
+        );
+
+        let mut discovered = evidence_snapshot(&retained);
+        discovered
+            .unresolved_dissent
+            .push(evidence("sre", "new-operational-dissent", "1"));
+        let mut current = live_frontier(
+            &retained,
+            vec![retained.goal().clone(), retained.goal().clone()],
+            discovered,
+        );
+        let observed = current.current("product-delivery").unwrap();
+        assert_eq!(
+            proposal(retained).currentness(&observed),
+            ProposalCurrentnessV1::EvidenceChanged
+        );
+    }
+
+    struct SnapshotClient {
+        response: Option<chronos_protocol::Response>,
+        requested: Option<String>,
+    }
+
+    impl chronos_client::WireClientV1 for SnapshotClient {
+        type Error = ();
+
+        fn request(
+            &mut self,
+            request: chronos_protocol::Request,
+        ) -> Result<chronos_protocol::Response, Self::Error> {
+            let chronos_protocol::Command::Snapshot { task } = request.command else {
+                return Err(());
+            };
+            self.requested = Some(task);
+            self.response.take().ok_or(())
+        }
+    }
+
+    fn snapshot_response(task: &str, incarnation: &str) -> chronos_protocol::Response {
+        chronos_protocol::Response {
+            version: 1,
+            outcome: chronos_protocol::Outcome::Snapshot {
+                value: Some(chronos_protocol::Entry {
+                    reference: chronos_protocol::Reference {
+                        task: task.into(),
+                        incarnation: incarnation.into(),
+                    },
+                    snapshot: chronos_protocol::Snapshot {
+                        phase: chronos_protocol::Phase::Blocked,
+                        attempt_number: None,
+                        dependency_count: 6,
+                        required_capability_count: 8,
+                        priority: 10,
+                        max_attempts: 1,
+                    },
+                }),
+                revision: Some(chronos_protocol::Revision::Finite("67".into())),
+            },
+        }
+    }
+
+    #[test]
+    fn chronos_control_task_reader_binds_the_exact_incarnation() {
+        use frontier::ControlTaskFrontierSourceV1;
+
+        let retained = alignment_basis("goal-v1", 66).control_task().clone();
+        let client = SnapshotClient {
+            response: Some(snapshot_response("pm-control", "1")),
+            requested: None,
+        };
+        let mut source = frontier::ChronosControlTaskSourceV1::new(client, 64).unwrap();
+        let observed = source
+            .current_task("product-delivery", &retained.reference)
+            .unwrap();
+        assert_eq!(observed.reference, retained.reference);
+        assert_eq!(observed.revision, StateRevision::finite(67));
+        assert_eq!(observed.task.dependency_count, 6);
+        assert_eq!(
+            source.into_client().requested.as_deref(),
+            Some("pm-control")
+        );
+
+        let stale = SnapshotClient {
+            response: Some(snapshot_response("pm-control", "2")),
+            requested: None,
+        };
+        assert_eq!(
+            frontier::ChronosControlTaskSourceV1::new(stale, 64)
+                .unwrap()
+                .current_task("product-delivery", &retained.reference),
+            Err(frontier::ChronosControlTaskReadErrorV1::StaleIncarnation)
+        );
+    }
+
+    struct VellumVersionTransport {
+        document: vellum_protocol::WorkspaceDocumentIdV1,
+        observed: Vec<vellum_protocol::CommandV1>,
+    }
+
+    impl vellum_protocol::ServicePort for VellumVersionTransport {
+        fn connect(
+            &mut self,
+        ) -> Result<vellum_protocol::ClientId, vellum_protocol::ServiceControlErrorV1> {
+            Ok(vellum_protocol::ClientId::new(7).unwrap())
+        }
+
+        fn execute(
+            &mut self,
+            request: vellum_protocol::RequestV1,
+        ) -> Result<vellum_protocol::ReplyV1, vellum_protocol::ServiceAccessErrorV1> {
+            self.observed.push(request.command.clone());
+            Ok(vellum_protocol::ReplyV1::Accepted(
+                vellum_protocol::OutcomeV1::DocumentVersionObserved(
+                    vellum_protocol::DocumentVersionObservationV1 {
+                        document: self.document,
+                        revision: 9,
+                        byte_length: 144,
+                    },
+                ),
+            ))
+        }
+
+        fn disconnect(
+            &mut self,
+            _: vellum_protocol::ClientId,
+        ) -> Result<(), vellum_protocol::ServiceControlErrorV1> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn vellum_goal_reader_updates_only_owner_native_source_evidence() {
+        use frontier::GoalFrontierSourceV1;
+        use vellum_host::annotation::{DocumentIdentity, SourceEvidence, Target};
+
+        let workspace = vellum_protocol::WorkspaceIdV1::new(3).unwrap();
+        let document = vellum_protocol::WorkspaceDocumentIdV1::new(workspace, 5).unwrap();
+        let client = vellum_client::Client::connect(VellumVersionTransport {
+            document,
+            observed: Vec::new(),
+        })
+        .unwrap();
+        let mut source = frontier::VellumGoalFrontierSourceV1::new(
+            client,
+            document,
+            "vellum-workspace".into(),
+            "delivery-goal".into(),
+        )
+        .unwrap();
+        let retained = SourceReferenceV1 {
+            document: DocumentIdentity {
+                namespace: "vellum-workspace".into(),
+                value: "delivery-goal".into(),
+            },
+            target: Target::Document {
+                source: SourceEvidence {
+                    domain: frontier::VELLUM_WORKSPACE_SOURCE_REVISION_DOMAIN_V1.into(),
+                    token: "8".into(),
+                    byte_length: 128,
+                },
+            },
+        };
+        let current = source.current_goal(&retained).unwrap();
+        assert_eq!(current.document, retained.document);
+        assert_eq!(
+            current.target.source().domain,
+            frontier::VELLUM_WORKSPACE_SOURCE_REVISION_DOMAIN_V1
+        );
+        assert_eq!(current.target.source().token, "9");
+        assert_eq!(current.target.source().byte_length, 144);
+        let transport = source.into_client().into_transport();
+        assert_eq!(transport.observed.len(), 1);
+        assert!(matches!(
+            transport.observed[0],
+            vellum_protocol::CommandV1::ObserveDocumentVersion { document: observed }
+                if observed == document
+        ));
     }
 
     #[test]
