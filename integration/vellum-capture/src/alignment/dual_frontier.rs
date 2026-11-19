@@ -14,6 +14,7 @@ use chronos_sdk_embedded::engine::RevisionedTaskSnapshotV1;
 use keystone_storage::{CommitGate, CommitOutcome, Revision};
 
 mod codec;
+pub mod frontier;
 pub mod host;
 pub mod journal;
 #[cfg(unix)]
@@ -337,22 +338,10 @@ fn revalidate_reconciliation(
     value: &DualFrontierReconciliationV1,
     limits: AlignmentLimitsV1,
 ) -> Result<(), DualFrontierRegisterErrorV1> {
-    let rebuild_worker = |worker: &WorkerFrontierV1| {
-        WorkerFrontierV1::new(
-            worker.kind,
-            worker.principal.clone(),
-            worker.task.clone(),
-            worker.attempt.clone(),
-            worker.lease.clone(),
-            worker.contribution.clone(),
-            worker.evidence.clone(),
-            limits,
-        )
-    };
     let rebuilt = DualFrontierReconciliationV1::new(
         value.basis.clone(),
-        rebuild_worker(&value.external).map_err(map_alignment_error)?,
-        rebuild_worker(&value.constrained).map_err(map_alignment_error)?,
+        revalidate_worker(&value.external, limits).map_err(map_alignment_error)?,
+        revalidate_worker(&value.constrained, limits).map_err(map_alignment_error)?,
         value.author.clone(),
         value.rationale.clone(),
         value.judgment,
@@ -365,6 +354,22 @@ fn revalidate_reconciliation(
         return Err(DualFrontierRegisterErrorV1::Invalid);
     }
     Ok(())
+}
+
+fn revalidate_worker(
+    worker: &WorkerFrontierV1,
+    limits: AlignmentLimitsV1,
+) -> Result<WorkerFrontierV1, AlignmentErrorV1> {
+    WorkerFrontierV1::new(
+        worker.kind,
+        worker.principal.clone(),
+        worker.task.clone(),
+        worker.attempt.clone(),
+        worker.lease.clone(),
+        worker.contribution.clone(),
+        worker.evidence.clone(),
+        limits,
+    )
 }
 
 fn map_alignment_error(error: AlignmentErrorV1) -> DualFrontierRegisterErrorV1 {
@@ -519,7 +524,10 @@ mod tests {
     use super::super::tests::{alignment_basis, source};
     use super::*;
     use keystone_storage::{AcknowledgementStrength, CommitOutcome, CommitReceipt};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        collections::VecDeque,
+        sync::{Arc, Mutex},
+    };
 
     #[derive(Clone, Default)]
     struct MemoryJournal {
@@ -539,6 +547,38 @@ mod tests {
     struct Frontier {
         basis: AlignmentBasisV1,
         unavailable: bool,
+    }
+
+    struct WorkerSource {
+        values: VecDeque<Result<WorkerFrontierV1, &'static str>>,
+        calls: Vec<(String, FrontierKindV1, String)>,
+    }
+
+    impl WorkerSource {
+        fn stable(value: WorkerFrontierV1) -> Self {
+            Self {
+                values: VecDeque::from([Ok(value.clone()), Ok(value)]),
+                calls: Vec::new(),
+            }
+        }
+    }
+
+    impl frontier::WorkerFrontierSourceV1 for WorkerSource {
+        type Error = &'static str;
+
+        fn current(
+            &mut self,
+            chronos_scope: &str,
+            kind: FrontierKindV1,
+            principal: &PrincipalRefV1,
+        ) -> Result<WorkerFrontierV1, Self::Error> {
+            self.calls.push((
+                chronos_scope.to_owned(),
+                kind,
+                principal.as_str().to_owned(),
+            ));
+            self.values.pop_front().expect("bounded source sample")
+        }
     }
 
     impl super::super::host::AlignmentFrontierV1 for Frontier {
@@ -736,6 +776,105 @@ mod tests {
         assert!(matches!(
             observed.currentness,
             chronos_protocol::alignment_v1::Currentness::GoalChanged
+        ));
+    }
+
+    #[test]
+    fn worker_sampler_requires_two_stable_attributed_owner_reads() {
+        let basis = alignment_basis("goal-v1", 66);
+        let external = worker(FrontierKindV1::ExternalSupervisor, "frontier-supervisor");
+        let constrained = worker(FrontierKindV1::PantheonConstrainedWorker, "insider");
+        let mut sampler = frontier::StableWorkerFrontierSamplerV1::new(
+            &basis,
+            principal("insider"),
+            WorkerSource::stable(external.clone()),
+            WorkerSource::stable(constrained.clone()),
+            limits(),
+        )
+        .unwrap();
+        let observed = sampler.sample().unwrap();
+        assert_eq!(observed.external(), &external);
+        assert_eq!(observed.constrained(), &constrained);
+        let (external_source, constrained_source) = sampler.into_sources();
+        assert_eq!(external_source.calls.len(), 2);
+        assert_eq!(constrained_source.calls.len(), 2);
+        assert!(external_source.calls.iter().all(|call| call
+            == &(
+                String::from("product-delivery"),
+                FrontierKindV1::ExternalSupervisor,
+                String::from("frontier-supervisor")
+            )));
+        assert!(constrained_source.calls.iter().all(|call| call
+            == &(
+                String::from("product-delivery"),
+                FrontierKindV1::PantheonConstrainedWorker,
+                String::from("insider")
+            )));
+    }
+
+    #[test]
+    fn worker_sampler_refuses_drift_substitution_and_role_collapse() {
+        let basis = alignment_basis("goal-v1", 66);
+        let external = worker(FrontierKindV1::ExternalSupervisor, "frontier-supervisor");
+        let changed_external = WorkerFrontierV1::new(
+            FrontierKindV1::ExternalSupervisor,
+            principal("frontier-supervisor"),
+            None,
+            None,
+            None,
+            None,
+            vec![reference("external/evidence/changed")],
+            limits(),
+        )
+        .unwrap();
+        let constrained = worker(FrontierKindV1::PantheonConstrainedWorker, "insider");
+        let mut unstable = frontier::StableWorkerFrontierSamplerV1::new(
+            &basis,
+            principal("insider"),
+            WorkerSource {
+                values: VecDeque::from([Ok(external), Ok(changed_external)]),
+                calls: Vec::new(),
+            },
+            WorkerSource::stable(constrained.clone()),
+            limits(),
+        )
+        .unwrap();
+        assert!(matches!(
+            unstable.sample(),
+            Err(frontier::StableWorkerFrontierErrorV1::Unstable)
+        ));
+
+        let substituted = worker(
+            FrontierKindV1::PantheonConstrainedWorker,
+            "frontier-supervisor",
+        );
+        let mut invalid = frontier::StableWorkerFrontierSamplerV1::new(
+            &basis,
+            principal("insider"),
+            WorkerSource::stable(substituted),
+            WorkerSource::stable(constrained),
+            limits(),
+        )
+        .unwrap();
+        assert!(matches!(
+            invalid.sample(),
+            Err(frontier::StableWorkerFrontierErrorV1::Invalid)
+        ));
+        assert!(matches!(
+            frontier::StableWorkerFrontierSamplerV1::new(
+                &basis,
+                principal("product-manager"),
+                WorkerSource::stable(worker(
+                    FrontierKindV1::ExternalSupervisor,
+                    "frontier-supervisor"
+                )),
+                WorkerSource::stable(worker(
+                    FrontierKindV1::PantheonConstrainedWorker,
+                    "product-manager"
+                )),
+                limits(),
+            ),
+            Err(frontier::StableWorkerFrontierErrorV1::Invalid)
         ));
     }
 

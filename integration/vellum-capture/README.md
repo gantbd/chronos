@@ -264,6 +264,17 @@ replacement. No live worker-frontier reader or recurring PM composition is
 packaged yet, so the endpoint can expose an owner-composed reconciliation but
 cannot manufacture or continuously refresh worker truth.
 
+Worker acquisition now has a deterministic owner port and stability boundary.
+The external supervisor is pre-bound to the alignment cohort's exact frontier-
+supervisor principal; the constrained worker is a separately configured
+principal that cannot collapse into the supervisor, product manager or external
+advocate. Each source receives the exact Chronos scope, role and principal, and
+the sampler accepts only two equal complete reads from both sources. Drift,
+role/principal substitution and malformed owner references refuse. This proves
+stable attributed input, not atomicity across owners or the truth of worker
+narration. Authenticated concrete publication adapters for the external and
+Pantheon-constrained workers remain open.
+
 Live document binding no longer requires a persisted process-local ID: the
 locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
