@@ -1,6 +1,7 @@
 //! Native composition, outside both engines and their distribution facades.
 //! No UI, parsing, execution, clock advance, automatic retry or source mutation.
 #![forbid(unsafe_code)]
+pub mod alignment;
 pub mod journal;
 #[cfg(target_os = "macos")]
 pub mod local_host;

@@ -86,6 +86,30 @@ SDK, and separate durable local service/capture registers across two complete
 restarts. This qualifies publication/recovery at the adapter boundary, not physical
 power-loss/device behavior, multi-writer locking or a supported packaged release.
 
+## Product alignment and grooming proposals
+
+`alignment` provides a bounded content-free contract for the product-alignment
+host. An `AlignmentBasisV1` binds one exact Vellum goal source version, one exact
+Chronos control-task observation and scope, three distinct attributed positions
+(external advocate, product manager and frontier supervisor), one budget-policy
+reference, and canonical bounded sets of evidence-frontier, unresolved-dissent
+and pending-human-gate references. Owner revisions remain opaque and rich content
+never enters Chronos.
+
+Only the named product-manager principal can construct a `GroomingProposalV1`.
+Continue/reorder proposals require at least one exact recommended task reference;
+all rich rationale and acceptance text remains in a separately versioned Vellum
+proposal artifact. `currentness` deterministically distinguishes goal, work,
+cohort and evidence drift. `Current` means exact frontier equality only: the
+contract has no apply, accept, claim, reprioritize, sign-off or authority method.
+Owner mutations still go through Chronos and consequential decisions still go
+through their named human/Aegis gates.
+
+The module is the typed contract slice, not yet a hosted durable alignment
+service or Pantheon presentation. Focused tests cover exact currentness, stale
+frontiers, PM impersonation, required next work, duplicate references and
+bounds; strict Clippy qualifies the library surface.
+
 ## Independent text handoff
 
 `text_handoff` renders an explicitly authorized full source capture alongside a
