@@ -105,10 +105,18 @@ contract has no apply, accept, claim, reprioritize, sign-off or authority method
 Owner mutations still go through Chronos and consequential decisions still go
 through their named human/Aegis gates.
 
-The module is the typed contract slice, not yet a hosted durable alignment
-service or Pantheon presentation. Focused tests cover exact currentness, stale
-frontiers, PM impersonation, required next work, duplicate references and
-bounds; strict Clippy qualifies the library surface.
+`AlignmentRegisterV1` durably creates one immutable proposal record at revision
+zero. Its closed bounded V1 codec rejects unknown versions/tags, malformed task
+snapshots, noncanonical evidence sets, truncation and tails. The directory
+adapter requires an exact durable Keystone receipt and reopens through the
+existing Chronos checkpoint mechanism; volatile or indeterminate commits fence
+publication. A new proposal uses a new exclusively owned register—there is no
+replace/update method that could rewrite the original basis.
+
+This is not yet a hosted alignment service or Pantheon presentation. Focused
+tests cover exact currentness, stale frontiers, PM impersonation, contradictory
+next work, duplicate references, codec refusal, weak-receipt fencing and real
+directory drop/reopen; strict Clippy qualifies the library surface.
 
 ## Independent text handoff
 

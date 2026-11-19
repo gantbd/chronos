@@ -5,14 +5,19 @@
 //! proposal, accept work, grant authority, or satisfy a human gate.
 
 use crate::SourceReferenceV1;
-use chronos_sdk_embedded::engine::{RevisionedTaskSnapshotV1, StateRevision, TaskRefV1};
+use chronos_sdk_embedded::engine::{RevisionedTaskSnapshotV1, StateRevision, TaskPhase, TaskRefV1};
+use keystone_storage::{CommitGate, CommitOutcome, Revision};
 use vellum_host::annotation::Target;
+
+mod codec;
+pub mod journal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AlignmentLimitsV1 {
     pub max_field_bytes: usize,
     pub max_evidence: usize,
     pub max_next_tasks: usize,
+    pub max_record_bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -90,11 +95,17 @@ impl AlignmentCohortV1 {
 
 /// Exact content-free owner reference. `revision` is owner-native and opaque;
 /// this adapter compares it byte-for-byte and never interprets it.
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
 pub struct OwnerEvidenceRefV1 {
     owner: String,
     resource: String,
     revision: String,
+}
+
+impl std::fmt::Debug for OwnerEvidenceRefV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OwnerEvidenceRefV1(<opaque>)")
+    }
 }
 
 impl OwnerEvidenceRefV1 {
@@ -129,7 +140,7 @@ impl OwnerEvidenceRefV1 {
 
 /// One exact reconciliation frontier. Absence from a bounded vector means
 /// "not supplied", never "none exists" or "resolved".
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct AlignmentBasisV1 {
     goal: SourceReferenceV1,
     chronos_scope: String,
@@ -139,6 +150,12 @@ pub struct AlignmentBasisV1 {
     evidence_frontier: Vec<OwnerEvidenceRefV1>,
     unresolved_dissent: Vec<OwnerEvidenceRefV1>,
     pending_human_gates: Vec<OwnerEvidenceRefV1>,
+}
+
+impl std::fmt::Debug for AlignmentBasisV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AlignmentBasisV1(<redacted>)")
+    }
 }
 
 impl AlignmentBasisV1 {
@@ -156,10 +173,7 @@ impl AlignmentBasisV1 {
     ) -> Result<Self, AlignmentErrorV1> {
         validate_source(&goal, limits)?;
         validate_field(&chronos_scope, limits)?;
-        validate_task_ref(&control_task.reference, limits)?;
-        if control_task.revision == StateRevision::Exhausted {
-            return Err(AlignmentErrorV1::Invalid);
-        }
+        validate_task_snapshot(&control_task, limits)?;
         for principal in [
             cohort.external_advocate(),
             cohort.product_manager(),
@@ -228,7 +242,7 @@ pub enum GroomingRecommendationV1 {
 /// A PM-authored proposal bound to an exact reconciliation frontier. The rich
 /// rationale and acceptance text remain in `proposal`; the task list is an
 /// authority-free recommendation and cannot claim, reprioritize, or complete.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct GroomingProposalV1 {
     basis: AlignmentBasisV1,
     proposal: SourceReferenceV1,
@@ -236,6 +250,12 @@ pub struct GroomingProposalV1 {
     recommendation: GroomingRecommendationV1,
     recommended_next: Vec<TaskRefV1>,
     acceptance_evidence: Vec<OwnerEvidenceRefV1>,
+}
+
+impl std::fmt::Debug for GroomingProposalV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("GroomingProposalV1(<redacted>)")
+    }
 }
 
 impl GroomingProposalV1 {
@@ -354,6 +374,179 @@ pub enum ProposalCurrentnessV1 {
     EvidenceChanged,
 }
 
+/// Immutable durable carrier for one proposal basis. New proposals use new
+/// registers; this record cannot be replaced, accepted, or applied.
+#[derive(Clone, Eq, PartialEq)]
+pub struct AlignmentRecordV1 {
+    revision: u64,
+    proposal: GroomingProposalV1,
+}
+
+impl std::fmt::Debug for AlignmentRecordV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AlignmentRecordV1")
+            .field("revision", &self.revision)
+            .field("proposal", &"<redacted>")
+            .finish()
+    }
+}
+
+impl AlignmentRecordV1 {
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn proposal(&self) -> &GroomingProposalV1 {
+        &self.proposal
+    }
+}
+
+pub trait AlignmentJournalV1 {
+    type Error;
+
+    fn load(&mut self, limits: AlignmentLimitsV1)
+        -> Result<Option<AlignmentRecordV1>, Self::Error>;
+
+    fn commit(
+        &mut self,
+        expected: Option<Revision>,
+        record: &AlignmentRecordV1,
+    ) -> Result<CommitOutcome, Self::Error>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AlignmentRegisterErrorV1 {
+    Invalid,
+    Limit,
+    Conflict,
+    Unavailable,
+    Storage,
+}
+
+/// Reopenable view of one durably created immutable proposal record.
+pub struct AlignmentRegisterV1<J> {
+    journal: J,
+    record: AlignmentRecordV1,
+}
+
+impl<J: AlignmentJournalV1> AlignmentRegisterV1<J> {
+    pub fn create(
+        mut journal: J,
+        proposal: GroomingProposalV1,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, AlignmentRegisterErrorV1> {
+        validate_limits(limits)?;
+        revalidate_proposal(&proposal, limits)?;
+        if let Some(existing) = journal
+            .load(limits)
+            .map_err(|_| AlignmentRegisterErrorV1::Storage)?
+        {
+            validate_record(&existing, limits)?;
+            return Err(AlignmentRegisterErrorV1::Conflict);
+        }
+        let record = AlignmentRecordV1 {
+            revision: 0,
+            proposal,
+        };
+        let mut gate = CommitGate::new(None);
+        gate.resolve(Revision(0), journal.commit(None, &record))
+            .map_err(|_| AlignmentRegisterErrorV1::Storage)?;
+        Ok(Self { journal, record })
+    }
+
+    pub fn open(
+        mut journal: J,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, AlignmentRegisterErrorV1> {
+        validate_limits(limits)?;
+        let record = journal
+            .load(limits)
+            .map_err(|_| AlignmentRegisterErrorV1::Storage)?
+            .ok_or(AlignmentRegisterErrorV1::Unavailable)?;
+        validate_record(&record, limits)?;
+        Ok(Self { journal, record })
+    }
+
+    pub fn record(&self) -> &AlignmentRecordV1 {
+        &self.record
+    }
+
+    pub fn currentness(&self, current: &AlignmentBasisV1) -> ProposalCurrentnessV1 {
+        self.record.proposal.currentness(current)
+    }
+
+    pub fn into_journal(self) -> J {
+        self.journal
+    }
+}
+
+fn validate_limits(limits: AlignmentLimitsV1) -> Result<(), AlignmentRegisterErrorV1> {
+    if limits.max_field_bytes == 0
+        || limits.max_evidence == 0
+        || limits.max_next_tasks == 0
+        || limits.max_record_bytes < 256
+    {
+        Err(AlignmentRegisterErrorV1::Limit)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_record(
+    record: &AlignmentRecordV1,
+    limits: AlignmentLimitsV1,
+) -> Result<(), AlignmentRegisterErrorV1> {
+    if record.revision != 0 {
+        return Err(AlignmentRegisterErrorV1::Invalid);
+    }
+    revalidate_proposal(&record.proposal, limits)
+}
+
+fn revalidate_proposal(
+    proposal: &GroomingProposalV1,
+    limits: AlignmentLimitsV1,
+) -> Result<(), AlignmentRegisterErrorV1> {
+    let basis = &proposal.basis;
+    let rebuilt_basis = AlignmentBasisV1::new(
+        basis.goal.clone(),
+        basis.chronos_scope.clone(),
+        basis.control_task.clone(),
+        basis.cohort.clone(),
+        basis.budget_policy.clone(),
+        basis.evidence_frontier.clone(),
+        basis.unresolved_dissent.clone(),
+        basis.pending_human_gates.clone(),
+        limits,
+    )
+    .map_err(map_alignment_error)?;
+    let rebuilt = GroomingProposalV1::new(
+        rebuilt_basis,
+        proposal.proposal.clone(),
+        proposal.author.clone(),
+        proposal.recommendation,
+        proposal.recommended_next.clone(),
+        proposal.acceptance_evidence.clone(),
+        limits,
+    )
+    .map_err(map_alignment_error)?;
+    if &rebuilt != proposal {
+        return Err(AlignmentRegisterErrorV1::Invalid);
+    }
+    Ok(())
+}
+
+fn map_alignment_error(error: AlignmentErrorV1) -> AlignmentRegisterErrorV1 {
+    match error {
+        AlignmentErrorV1::Limit => AlignmentRegisterErrorV1::Limit,
+        AlignmentErrorV1::Invalid
+        | AlignmentErrorV1::Duplicate
+        | AlignmentErrorV1::WrongAuthor
+        | AlignmentErrorV1::NextWorkRequired
+        | AlignmentErrorV1::NextWorkForbidden => AlignmentRegisterErrorV1::Invalid,
+    }
+}
+
 fn validate_source(
     source: &SourceReferenceV1,
     limits: AlignmentLimitsV1,
@@ -413,6 +606,36 @@ fn validate_task_ref(task: &TaskRefV1, limits: AlignmentLimitsV1) -> Result<(), 
     Ok(())
 }
 
+fn validate_task_snapshot(
+    snapshot: &RevisionedTaskSnapshotV1,
+    limits: AlignmentLimitsV1,
+) -> Result<(), AlignmentErrorV1> {
+    validate_task_ref(&snapshot.reference, limits)?;
+    if snapshot.revision == StateRevision::Exhausted
+        || snapshot.task.max_attempts == 0
+        || snapshot.task.dependency_count > u32::MAX as usize
+        || snapshot.task.required_capability_count > u32::MAX as usize
+    {
+        return Err(AlignmentErrorV1::Invalid);
+    }
+    match (snapshot.task.phase, snapshot.task.attempt_number) {
+        (TaskPhase::Running | TaskPhase::Uncertain, Some(attempt))
+            if attempt > 0 && attempt <= snapshot.task.max_attempts =>
+        {
+            Ok(())
+        }
+        (
+            TaskPhase::Blocked
+            | TaskPhase::Ready
+            | TaskPhase::Succeeded
+            | TaskPhase::Failed
+            | TaskPhase::Cancelled,
+            None,
+        ) => Ok(()),
+        _ => Err(AlignmentErrorV1::Invalid),
+    }
+}
+
 fn validate_field(value: &str, limits: AlignmentLimitsV1) -> Result<(), AlignmentErrorV1> {
     if value.is_empty() || value.chars().any(char::is_control) {
         Err(AlignmentErrorV1::Invalid)
@@ -434,13 +657,53 @@ fn has_duplicates<T: PartialEq>(values: &[T]) -> bool {
 mod tests {
     use super::*;
     use chronos_sdk_embedded::engine::{TaskPhase, TaskSnapshotV1};
+    use keystone_storage::{AcknowledgementStrength, CommitReceipt};
+    use std::sync::{Arc, Mutex};
     use vellum_host::annotation::{DocumentIdentity, SourceEvidence};
 
-    fn limits() -> AlignmentLimitsV1 {
+    #[derive(Clone, Default)]
+    struct MemoryJournal {
+        record: Arc<Mutex<Option<AlignmentRecordV1>>>,
+        weak: bool,
+        indeterminate: bool,
+    }
+
+    impl AlignmentJournalV1 for MemoryJournal {
+        type Error = ();
+
+        fn load(&mut self, _: AlignmentLimitsV1) -> Result<Option<AlignmentRecordV1>, Self::Error> {
+            Ok(self.record.lock().unwrap().clone())
+        }
+
+        fn commit(
+            &mut self,
+            expected: Option<Revision>,
+            record: &AlignmentRecordV1,
+        ) -> Result<CommitOutcome, Self::Error> {
+            assert_eq!(expected, None);
+            *self.record.lock().unwrap() = Some(record.clone());
+            if self.indeterminate {
+                Ok(CommitOutcome::Indeterminate)
+            } else {
+                Ok(CommitOutcome::Committed(CommitReceipt {
+                    revision: Revision(0),
+                    mechanism: "alignment-memory-test",
+                    strength: if self.weak {
+                        AcknowledgementStrength::Volatile
+                    } else {
+                        AcknowledgementStrength::Durable
+                    },
+                }))
+            }
+        }
+    }
+
+    pub(super) fn limits() -> AlignmentLimitsV1 {
         AlignmentLimitsV1 {
             max_field_bytes: 64,
             max_evidence: 8,
             max_next_tasks: 4,
+            max_record_bytes: 8192,
         }
     }
 
@@ -483,7 +746,7 @@ mod tests {
         }
     }
 
-    fn alignment_basis(token: &str, revision: u64) -> AlignmentBasisV1 {
+    pub(super) fn alignment_basis(token: &str, revision: u64) -> AlignmentBasisV1 {
         AlignmentBasisV1::new(
             source(token),
             "product-delivery".into(),
@@ -503,7 +766,7 @@ mod tests {
         .unwrap()
     }
 
-    fn proposal(basis: AlignmentBasisV1) -> GroomingProposalV1 {
+    pub(super) fn proposal(basis: AlignmentBasisV1) -> GroomingProposalV1 {
         GroomingProposalV1::new(
             basis,
             source("proposal-v1"),
@@ -638,5 +901,86 @@ mod tests {
             PrincipalRefV1::new("product-manager".into(), tiny),
             Err(AlignmentErrorV1::Limit)
         );
+    }
+
+    #[test]
+    fn immutable_register_requires_durable_creation_and_reopens_exactly() {
+        let basis = alignment_basis("goal-v1", 66);
+        let proposal = proposal(basis.clone());
+        let register =
+            AlignmentRegisterV1::create(MemoryJournal::default(), proposal.clone(), limits())
+                .unwrap();
+        assert_eq!(register.record().revision(), 0);
+        assert_eq!(register.record().proposal(), &proposal);
+        assert_eq!(register.currentness(&basis), ProposalCurrentnessV1::Current);
+
+        let journal = register.into_journal();
+        assert_eq!(
+            AlignmentRegisterV1::create(journal.clone(), proposal.clone(), limits()).map(|_| ()),
+            Err(AlignmentRegisterErrorV1::Conflict)
+        );
+        let reopened = AlignmentRegisterV1::open(journal, limits()).unwrap();
+        assert_eq!(reopened.record().proposal(), &proposal);
+
+        let mut invalid_proposal = proposal.clone();
+        invalid_proposal.basis.control_task.task.max_attempts = 0;
+        assert_eq!(
+            AlignmentRegisterV1::create(MemoryJournal::default(), invalid_proposal, limits())
+                .map(|_| ()),
+            Err(AlignmentRegisterErrorV1::Invalid)
+        );
+
+        let corrupt = MemoryJournal::default();
+        *corrupt.record.lock().unwrap() = Some(AlignmentRecordV1 {
+            revision: 1,
+            proposal: proposal.clone(),
+        });
+        assert_eq!(
+            AlignmentRegisterV1::create(corrupt, proposal.clone(), limits()).map(|_| ()),
+            Err(AlignmentRegisterErrorV1::Invalid)
+        );
+
+        for journal in [
+            MemoryJournal {
+                weak: true,
+                ..Default::default()
+            },
+            MemoryJournal {
+                indeterminate: true,
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(
+                AlignmentRegisterV1::create(journal, proposal.clone(), limits()).map(|_| ()),
+                Err(AlignmentRegisterErrorV1::Storage)
+            );
+        }
+    }
+
+    #[test]
+    fn directory_register_survives_drop_and_reopen() {
+        let directory = std::env::temp_dir().join(format!(
+            "chronos-alignment-register-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let expected = proposal(alignment_basis("goal-v1", 66));
+        {
+            let journal =
+                journal::DirectoryAlignmentJournalV1::open(&directory, limits(), 8).unwrap();
+            let created = AlignmentRegisterV1::create(journal, expected.clone(), limits()).unwrap();
+            assert_eq!(created.record().proposal(), &expected);
+        }
+        {
+            let journal =
+                journal::DirectoryAlignmentJournalV1::open(&directory, limits(), 8).unwrap();
+            let reopened = AlignmentRegisterV1::open(journal, limits()).unwrap();
+            assert_eq!(reopened.record().proposal(), &expected);
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }
