@@ -353,6 +353,38 @@ pub enum TaskState {
     Cancelled,
 }
 
+/// The one authoritative work-item status presented to humans and agents.
+/// Lease, attempt and scheduler state remain execution facts, not another
+/// public task-status machine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskStatusV1 {
+    Backlog,
+    Open,
+    Blocked,
+    InProgress,
+    ReadyForReview,
+    Done,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockerKindV1 {
+    Dependency,
+    Decision,
+    External,
+    Policy,
+    Resource,
+}
+
+/// Structured, content-free evidence retained whenever the actual status is
+/// `Blocked`. The optional opaque reference resolves in its owning evidence
+/// system; `resume_to` is the explicit authorized unblocking destination.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TaskBlockerV1 {
+    pub kind: BlockerKindV1,
+    pub evidence: Option<[u8; 16]>,
+    pub resume_to: TaskStatusV1,
+}
+
 /// Closed content-free observation of lifecycle phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TaskPhase {
@@ -382,6 +414,8 @@ pub struct TaskProjection {
 /// idempotency material, attempt identity, and lease authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TaskSnapshotV1 {
+    pub status: TaskStatusV1,
+    pub blocker: Option<TaskBlockerV1>,
     pub phase: TaskPhase,
     pub attempt_number: Option<u32>,
     pub dependency_count: usize,
@@ -564,6 +598,8 @@ pub struct Task {
     pub priority: i32,
     pub dependencies: BTreeSet<TaskId>,
     pub required_capabilities: BTreeSet<String>,
+    pub status: TaskStatusV1,
+    pub blocker: Option<TaskBlockerV1>,
     pub state: TaskState,
     pub attempts: u32,
     pub max_attempts: u32,
@@ -653,6 +689,8 @@ impl TaskSpecV2 {
             priority: self.priority,
             dependencies: self.dependencies,
             required_capabilities: self.required_capabilities,
+            status: TaskStatusV1::Open,
+            blocker: None,
             state: TaskState::Ready,
             attempts: 0,
             max_attempts: self.max_attempts,
@@ -699,6 +737,8 @@ impl std::fmt::Debug for Task {
                 "required_capability_count",
                 &self.required_capabilities.len(),
             )
+            .field("status", &self.status)
+            .field("has_blocker", &self.blocker.is_some())
             .field("state", &self.state)
             .field("attempts", &self.attempts)
             .field("max_attempts", &self.max_attempts)
@@ -716,6 +756,8 @@ impl Task {
             priority: 0,
             dependencies: BTreeSet::new(),
             required_capabilities: BTreeSet::new(),
+            status: TaskStatusV1::Open,
+            blocker: None,
             state: TaskState::Ready,
             attempts: 0,
             max_attempts: 3,
@@ -726,6 +768,12 @@ impl Task {
 
     pub fn depends_on(mut self, task_id: impl Into<TaskId>) -> Self {
         self.dependencies.insert(task_id.into());
+        self.status = TaskStatusV1::Blocked;
+        self.blocker = Some(TaskBlockerV1 {
+            kind: BlockerKindV1::Dependency,
+            evidence: None,
+            resume_to: TaskStatusV1::Open,
+        });
         self.state = TaskState::Blocked;
         self
     }

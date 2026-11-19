@@ -242,11 +242,11 @@ fn eligibility_is_incarnation_scoped_and_idempotent_controls_do_not_advance_revi
     );
 }
 #[test]
-fn opt_in_checkpoint_v3_preserves_controls_and_recovery_does_not_restore_live_leases() {
+fn checkpoint_v4_preserves_controls_and_recovery_does_not_restore_live_leases() {
     let mut legacy = Engine::new();
     assert_eq!(
         &legacy.prepare_checkpoint(100_000).unwrap().bytes()[8..10],
-        &[2, 0]
+        &[4, 0]
     );
     let mut engine = owner();
     let task = engine.task_reference(&"b".into()).unwrap();
@@ -266,7 +266,7 @@ fn opt_in_checkpoint_v3_preserves_controls_and_recovery_does_not_restore_live_le
         .unwrap();
     control(&mut engine, Control::SetPaused { paused: true });
     let checkpoint = engine.prepare_checkpoint(100_000).unwrap();
-    assert_eq!(&checkpoint.bytes()[8..10], &[3, 0]);
+    assert_eq!(&checkpoint.bytes()[8..10], &[4, 0]);
     let recover = |bytes: &[u8]| {
         Engine::recover_checkpoint(bytes, RecoveryLimits::new(100_000, EngineLimits::default()))
     };

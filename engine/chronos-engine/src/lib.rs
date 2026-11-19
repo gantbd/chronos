@@ -29,7 +29,7 @@ pub use command_v2::{CommandKindV2, CommandOutcomeV2, CommandV2, PreparedTransit
 pub use engine::{
     AdmissionReport, AdmissionRule, CancelError, ClaimError, CompletionError, ConditionalError,
     Engine, EngineError, FailureError, GrantError, ReadError, ResolutionError, RetirementError,
-    TemporalError, TimeError,
+    TaskStatusTransitionErrorV1, TaskStatusTransitionReceiptV1, TemporalError, TimeError,
 };
 pub use instrumentation::{Disposition, EngineUsage, Observation, Operation, Recorder};
 pub use integration::{GraphAdmissionReceiptV1, IntegrationEffectIdV1};
@@ -38,12 +38,12 @@ pub use journal::{
     CommandJournalV2, JournalError, JournalUsage,
 };
 pub use model::{
-    Agent, AttemptId, CapabilityGrant, Claim, DependencyDirection, EngineLimits, EngineTime,
-    FailureClassV1, FailureDisposition, LeaseToken, OutcomeDisposition, ReadinessReasonV1,
-    RetainedOutcome, RetrySafetyV1, RevisionedTaskSnapshotV1, ScheduleKey, SchedulingProfile,
-    StateRevision, Task, TaskAttemptRefV1, TaskExplanationV1, TaskId, TaskIncarnation,
-    TaskListEntryV1, TaskPageCursorV1, TaskPageV1, TaskPhase, TaskProjection, TaskRefV1,
-    TaskSnapshotV1, TaskSpecV2, TaskState,
+    Agent, AttemptId, BlockerKindV1, CapabilityGrant, Claim, DependencyDirection, EngineLimits,
+    EngineTime, FailureClassV1, FailureDisposition, LeaseToken, OutcomeDisposition,
+    ReadinessReasonV1, RetainedOutcome, RetrySafetyV1, RevisionedTaskSnapshotV1, ScheduleKey,
+    SchedulingProfile, StateRevision, Task, TaskAttemptRefV1, TaskBlockerV1, TaskExplanationV1,
+    TaskId, TaskIncarnation, TaskListEntryV1, TaskPageCursorV1, TaskPageV1, TaskPhase,
+    TaskProjection, TaskRefV1, TaskSnapshotV1, TaskSpecV2, TaskState, TaskStatusV1,
 };
 pub use persistence::{
     AcknowledgementError, AcknowledgementStrength, Checkpoint, CheckpointError, CommitReceipt,

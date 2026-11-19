@@ -8,11 +8,12 @@ use crate::algebra::{
 use crate::instrumentation::{Disposition, EngineUsage, Observation, Operation, Recorder};
 use crate::integration::{GraphAdmissionReceiptV1, IntegrationEffectIdV1};
 use crate::model::{
-    Agent, AttemptId, CapabilityGrant, Claim, EngineLimits, EngineTime, FailureDisposition,
-    LeaseToken, OutcomeDisposition, ReadinessReasonV1, RetainedOutcome, RevisionedTaskSnapshotV1,
-    ScheduleKey, SchedulingProfile, StateRevision, Task, TaskExplanationV1, TaskId,
-    TaskIncarnation, TaskListEntryV1, TaskPageCursorV1, TaskPageV1, TaskPhase, TaskProjection,
-    TaskRefV1, TaskSnapshotV1, TaskSpecV2, TaskState, expires_at,
+    Agent, AttemptId, BlockerKindV1, CapabilityGrant, Claim, EngineLimits, EngineTime,
+    FailureDisposition, LeaseToken, OutcomeDisposition, ReadinessReasonV1, RetainedOutcome,
+    RevisionedTaskSnapshotV1, ScheduleKey, SchedulingProfile, StateRevision, Task, TaskBlockerV1,
+    TaskExplanationV1, TaskId, TaskIncarnation, TaskListEntryV1, TaskPageCursorV1, TaskPageV1,
+    TaskPhase, TaskProjection, TaskRefV1, TaskSnapshotV1, TaskSpecV2, TaskState, TaskStatusV1,
+    expires_at,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,6 +177,28 @@ pub enum CancelError {
     TaskNotFound(TaskId),
     StaleReference(TaskId),
     AlreadyTerminal(TaskId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskStatusTransitionErrorV1 {
+    TaskNotFound,
+    StaleReference,
+    StatusChanged { actual: TaskStatusV1 },
+    NoChange,
+    InvalidTransition,
+    BlockerRequired,
+    UnexpectedBlocker,
+    InvalidResumeStatus,
+    ExecutionNotReady,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskStatusTransitionReceiptV1 {
+    pub reference: TaskRefV1,
+    pub revision: StateRevision,
+    pub prior: TaskStatusV1,
+    pub current: TaskStatusV1,
+    pub blocker: Option<TaskBlockerV1>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -570,6 +593,8 @@ impl Engine {
         let projection = self.project_task(id)?;
         let task = self.tasks.get(id)?;
         Some(TaskSnapshotV1 {
+            status: task.status,
+            blocker: task.blocker,
             phase: projection.phase,
             attempt_number: projection.attempt_number,
             dependency_count: projection.dependency_count,
@@ -981,10 +1006,14 @@ impl Engine {
         else {
             return Err(EngineError::DependencyEdgeLimit);
         };
-        task.state = if task.dependencies.is_empty() {
-            TaskState::Ready
+        (task.state, task.status, task.blocker) = if task.dependencies.is_empty() {
+            (TaskState::Ready, TaskStatusV1::Open, None)
         } else {
-            TaskState::Blocked
+            (
+                TaskState::Blocked,
+                TaskStatusV1::Blocked,
+                Some(dependency_blocker()),
+            )
         };
         task.incarnation = Some(TaskIncarnation(incarnation));
         self.dependency_edges = prospective_edges;
@@ -1069,10 +1098,14 @@ impl Engine {
             .map(|(id, _)| id.clone())
             .collect();
         for (offset, task) in candidates.values_mut().enumerate() {
-            task.state = if task.dependencies.is_subset(&succeeded) {
-                TaskState::Ready
+            (task.state, task.status, task.blocker) = if task.dependencies.is_subset(&succeeded) {
+                (TaskState::Ready, TaskStatusV1::Open, None)
             } else {
-                TaskState::Blocked
+                (
+                    TaskState::Blocked,
+                    TaskStatusV1::Blocked,
+                    Some(dependency_blocker()),
+                )
             };
             let offset = u64::try_from(offset).map_err(|_| EngineError::TaskLimit)?;
             task.incarnation = Some(TaskIncarnation(
@@ -1211,10 +1244,13 @@ impl Engine {
             return Err(CancelError::AlreadyTerminal(task_id.clone()));
         }
         let (attempt_id, attempt_number) = attempt_identity(task);
-        self.tasks
+        let task = self
+            .tasks
             .get_mut(task_id)
-            .expect("validated task must exist")
-            .state = TaskState::Cancelled;
+            .expect("validated task must exist");
+        task.state = TaskState::Cancelled;
+        task.status = TaskStatusV1::Backlog;
+        task.blocker = None;
         self.retain_outcome(
             task_id.clone(),
             attempt_id,
@@ -1292,10 +1328,13 @@ impl Engine {
 
         match knowledge {
             EffectKnowledge::Completed => {
-                self.tasks
+                let task = self
+                    .tasks
                     .get_mut(task_id)
-                    .expect("validated task must exist")
-                    .state = TaskState::Succeeded;
+                    .expect("validated task must exist");
+                task.state = TaskState::Succeeded;
+                task.status = TaskStatusV1::ReadyForReview;
+                task.blocker = None;
                 self.retain_outcome(
                     task_id.clone(),
                     Some(attempt_id),
@@ -1311,16 +1350,24 @@ impl Engine {
                 }
                 let retry = failure_disposition == FailureDisposition::Retry
                     && task.attempts < task.max_attempts;
-                self.tasks
+                let task = self
+                    .tasks
                     .get_mut(task_id)
-                    .expect("validated task must exist")
-                    .state = if retry {
+                    .expect("validated task must exist");
+                task.state = if retry {
                     TaskState::Ready
                 } else {
                     TaskState::Failed {
                         reason: failure_reason,
                     }
                 };
+                if retry {
+                    task.status = TaskStatusV1::Open;
+                    task.blocker = None;
+                } else {
+                    task.status = TaskStatusV1::Blocked;
+                    task.blocker = Some(external_blocker());
+                }
                 self.retain_outcome(
                     task_id.clone(),
                     Some(attempt_id),
@@ -1409,6 +1456,7 @@ impl Engine {
                 .values()
                 .filter(|task| {
                     task.state == TaskState::Ready
+                        && task.status == TaskStatusV1::Open
                         && task.attempts < task.max_attempts
                         && task.can_run_on(&grant.agent)
                         && self.task_is_scheduling_eligible(task, now)
@@ -1458,7 +1506,10 @@ impl Engine {
             .tasks
             .get(task_id)
             .ok_or_else(|| ClaimError::TaskNotFound(task_id.clone()))?;
-        if task.state != TaskState::Ready || task.attempts >= task.max_attempts {
+        if task.state != TaskState::Ready
+            || task.status != TaskStatusV1::Open
+            || task.attempts >= task.max_attempts
+        {
             return Err(ClaimError::TaskNotReady(task_id.clone()));
         }
         if !task.can_run_on(&grant.agent) {
@@ -1527,10 +1578,13 @@ impl Engine {
         self.verify_lease(task_id, lease, now)?;
         let (attempt_id, attempt_number) =
             attempt_identity(self.tasks.get(task_id).expect("verified task must exist"));
-        self.tasks
+        let task = self
+            .tasks
             .get_mut(task_id)
-            .expect("verified task must exist")
-            .state = TaskState::Succeeded;
+            .expect("verified task must exist");
+        task.state = TaskState::Succeeded;
+        task.status = TaskStatusV1::ReadyForReview;
+        task.blocker = None;
         self.retain_outcome(
             task_id.clone(),
             attempt_id,
@@ -1639,14 +1693,22 @@ impl Engine {
         let task = self.tasks.get(task_id).expect("verified task must exist");
         let (attempt_id, attempt_number) = attempt_identity(task);
         let retry = disposition == FailureDisposition::Retry && task.attempts < task.max_attempts;
-        self.tasks
+        let task = self
+            .tasks
             .get_mut(task_id)
-            .expect("verified task must exist")
-            .state = if retry {
+            .expect("verified task must exist");
+        task.state = if retry {
             TaskState::Ready
         } else {
             TaskState::Failed { reason }
         };
+        if retry {
+            task.status = TaskStatusV1::Open;
+            task.blocker = None;
+        } else {
+            task.status = TaskStatusV1::Blocked;
+            task.blocker = Some(external_blocker());
+        }
         self.retain_outcome(
             task_id.clone(),
             attempt_id,
@@ -1763,10 +1825,8 @@ impl Engine {
             })
             .collect();
         for (id, attempt_id, attempt_number, retry) in &expired {
-            self.tasks
-                .get_mut(id)
-                .expect("expired task must exist")
-                .state = if *retry {
+            let task = self.tasks.get_mut(id).expect("expired task must exist");
+            task.state = if *retry {
                 TaskState::Ready
             } else {
                 TaskState::Uncertain {
@@ -1774,6 +1834,13 @@ impl Engine {
                     attempt_number: *attempt_number,
                 }
             };
+            if *retry {
+                task.status = TaskStatusV1::Open;
+                task.blocker = None;
+            } else {
+                task.status = TaskStatusV1::InProgress;
+                task.blocker = None;
+            }
             self.retain_outcome(
                 id.clone(),
                 Some(attempt_id.clone()),
@@ -1901,6 +1968,8 @@ impl Engine {
             .get_mut(task_id)
             .expect("validated selected task must exist");
         task.attempts += 1;
+        task.status = TaskStatusV1::InProgress;
+        task.blocker = None;
         task.state = TaskState::Running(Claim {
             agent_id: grant.agent.id.clone(),
             attempt_id: AttemptId {
@@ -1942,8 +2011,42 @@ impl Engine {
         for task in self.tasks.values_mut() {
             if task.state == TaskState::Blocked && task.dependencies.is_subset(&succeeded) {
                 task.state = TaskState::Ready;
+                task.status = TaskStatusV1::Open;
+                task.blocker = None;
             }
         }
+    }
+
+    pub fn transition_task_status(
+        &mut self,
+        reference: &TaskRefV1,
+        expected: TaskStatusV1,
+        next: TaskStatusV1,
+        blocker: Option<TaskBlockerV1>,
+    ) -> Result<TaskStatusTransitionReceiptV1, TaskStatusTransitionErrorV1> {
+        let task = self
+            .tasks
+            .get_mut(reference.task_id())
+            .ok_or(TaskStatusTransitionErrorV1::TaskNotFound)?;
+        if task.incarnation != Some(reference.incarnation()) {
+            return Err(TaskStatusTransitionErrorV1::StaleReference);
+        }
+        if task.status != expected {
+            return Err(TaskStatusTransitionErrorV1::StatusChanged {
+                actual: task.status,
+            });
+        }
+        validate_status_transition(task, next, blocker)?;
+        task.status = next;
+        task.blocker = blocker;
+        self.advance_task_revision();
+        Ok(TaskStatusTransitionReceiptV1 {
+            reference: reference.clone(),
+            revision: self.task_state_revision(),
+            prior: expected,
+            current: next,
+            blocker,
+        })
     }
 
     fn retain_outcome(
@@ -1998,6 +2101,90 @@ impl Engine {
             }
         }
     }
+}
+
+const fn dependency_blocker() -> TaskBlockerV1 {
+    TaskBlockerV1 {
+        kind: BlockerKindV1::Dependency,
+        evidence: None,
+        resume_to: TaskStatusV1::Open,
+    }
+}
+
+const fn external_blocker() -> TaskBlockerV1 {
+    TaskBlockerV1 {
+        kind: BlockerKindV1::External,
+        evidence: None,
+        resume_to: TaskStatusV1::Open,
+    }
+}
+
+fn validate_status_transition(
+    task: &Task,
+    next: TaskStatusV1,
+    blocker: Option<TaskBlockerV1>,
+) -> Result<(), TaskStatusTransitionErrorV1> {
+    if task.status == next {
+        return Err(TaskStatusTransitionErrorV1::NoChange);
+    }
+    if next == TaskStatusV1::Blocked {
+        let blocker = blocker.ok_or(TaskStatusTransitionErrorV1::BlockerRequired)?;
+        if matches!(
+            blocker.resume_to,
+            TaskStatusV1::Blocked | TaskStatusV1::Done
+        ) {
+            return Err(TaskStatusTransitionErrorV1::InvalidResumeStatus);
+        }
+    } else if blocker.is_some() {
+        return Err(TaskStatusTransitionErrorV1::UnexpectedBlocker);
+    }
+    if task.status == TaskStatusV1::Blocked
+        && task.blocker.is_none_or(|current| current.resume_to != next)
+    {
+        return Err(TaskStatusTransitionErrorV1::InvalidTransition);
+    }
+    let allowed = matches!(
+        (task.status, next),
+        (
+            TaskStatusV1::Backlog,
+            TaskStatusV1::Open | TaskStatusV1::Blocked
+        ) | (
+            TaskStatusV1::Open,
+            TaskStatusV1::Backlog | TaskStatusV1::Blocked | TaskStatusV1::InProgress
+        ) | (
+            TaskStatusV1::Blocked,
+            TaskStatusV1::Backlog
+                | TaskStatusV1::Open
+                | TaskStatusV1::InProgress
+                | TaskStatusV1::ReadyForReview
+        ) | (
+            TaskStatusV1::InProgress,
+            TaskStatusV1::Open | TaskStatusV1::Blocked | TaskStatusV1::ReadyForReview
+        ) | (
+            TaskStatusV1::ReadyForReview,
+            TaskStatusV1::InProgress | TaskStatusV1::Blocked | TaskStatusV1::Done
+        )
+    );
+    if !allowed {
+        return Err(TaskStatusTransitionErrorV1::InvalidTransition);
+    }
+    let execution_ready = match next {
+        TaskStatusV1::InProgress => {
+            matches!(
+                task.state,
+                TaskState::Running(_) | TaskState::Uncertain { .. }
+            )
+        }
+        TaskStatusV1::ReadyForReview | TaskStatusV1::Done => {
+            matches!(task.state, TaskState::Succeeded)
+        }
+        TaskStatusV1::Open => matches!(task.state, TaskState::Ready),
+        TaskStatusV1::Backlog => matches!(task.state, TaskState::Ready | TaskState::Blocked),
+        TaskStatusV1::Blocked => !matches!(task.state, TaskState::Cancelled),
+    };
+    execution_ready
+        .then_some(())
+        .ok_or(TaskStatusTransitionErrorV1::ExecutionNotReady)
 }
 
 fn attempt_identity(task: &Task) -> (Option<AttemptId>, Option<u32>) {

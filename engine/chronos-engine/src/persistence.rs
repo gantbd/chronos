@@ -10,15 +10,16 @@ use std::time::{Duration, SystemTime};
 use crate::engine::Engine;
 use crate::instrumentation::{Disposition, Observation, Operation, Recorder};
 use crate::model::{
-    AttemptId, EngineLimits, OutcomeDisposition, RetainedOutcome, SchedulingProfile, Task, TaskId,
-    TaskIncarnation, TaskState,
+    AttemptId, BlockerKindV1, EngineLimits, OutcomeDisposition, RetainedOutcome, SchedulingProfile,
+    Task, TaskBlockerV1, TaskId, TaskIncarnation, TaskState, TaskStatusV1,
 };
 
 const MAGIC: &[u8; 8] = b"CHRONOS\0";
 const VERSION_V1: u16 = 1;
 const VERSION_V2: u16 = 2;
 const VERSION_V3: u16 = 3;
-const CURRENT_VERSION: u16 = VERSION_V2;
+const VERSION_V4: u16 = 4;
+const CURRENT_VERSION: u16 = VERSION_V4;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SnapshotRevision(u64);
@@ -229,11 +230,7 @@ fn encode(
 ) -> Result<Vec<u8>, CheckpointError> {
     let mut writer = Writer::new(max_snapshot_bytes);
     writer.write(MAGIC)?;
-    writer.u16(if engine.scheduling_controls.is_some() {
-        VERSION_V3
-    } else {
-        CURRENT_VERSION
-    })?;
+    writer.u16(CURRENT_VERSION)?;
     writer.u64(revision)?;
     writer.u64(engine.next_task_incarnation)?;
     writer.u64(engine.task_state_revision)?;
@@ -253,25 +250,29 @@ fn encode(
     for outcome in &engine.retained_outcomes {
         encode_outcome(&mut writer, outcome)?;
     }
-    if let Some(controls) = &engine.scheduling_controls {
-        writer.u8(u8::from(controls.paused))?;
-        writer.usize(controls.eligibility.len())?;
-        for (task, eligibility) in &controls.eligibility {
-            writer.string(task.task_id().as_str())?;
-            writer.u64(task.incarnation().get())?;
-            writer.u8(u8::from(eligibility.paused))?;
-            encode_system_time(&mut writer, eligibility.not_before)?;
-        }
-        match &controls.concurrency {
-            None => writer.u8(0)?,
-            Some(budget) => {
-                writer.u8(1)?;
-                writer.usize(budget.limit)?;
-                writer.usize(budget.reservations.len())?;
-                for attempt in &budget.reservations {
-                    writer.string(attempt.task().task_id().as_str())?;
-                    writer.u64(attempt.task().incarnation().get())?;
-                    writer.u32(attempt.attempt_number())?;
+    match &engine.scheduling_controls {
+        None => writer.u8(0)?,
+        Some(controls) => {
+            writer.u8(1)?;
+            writer.u8(u8::from(controls.paused))?;
+            writer.usize(controls.eligibility.len())?;
+            for (task, eligibility) in &controls.eligibility {
+                writer.string(task.task_id().as_str())?;
+                writer.u64(task.incarnation().get())?;
+                writer.u8(u8::from(eligibility.paused))?;
+                encode_system_time(&mut writer, eligibility.not_before)?;
+            }
+            match &controls.concurrency {
+                None => writer.u8(0)?,
+                Some(budget) => {
+                    writer.u8(1)?;
+                    writer.usize(budget.limit)?;
+                    writer.usize(budget.reservations.len())?;
+                    for attempt in &budget.reservations {
+                        writer.string(attempt.task().task_id().as_str())?;
+                        writer.u64(attempt.task().incarnation().get())?;
+                        writer.u32(attempt.attempt_number())?;
+                    }
                 }
             }
         }
@@ -343,6 +344,54 @@ fn encode_task(writer: &mut Writer, task: &Task) -> Result<(), CheckpointError> 
             writer.string(reason)
         }
         TaskState::Cancelled => writer.u8(6),
+    }?;
+    encode_task_workflow(writer, task.status, task.blocker)
+}
+
+fn encode_task_workflow(
+    writer: &mut Writer,
+    status: TaskStatusV1,
+    blocker: Option<TaskBlockerV1>,
+) -> Result<(), CheckpointError> {
+    writer.u8(task_status_tag(status))?;
+    match (status, blocker) {
+        (TaskStatusV1::Blocked, Some(blocker)) => {
+            writer.u8(1)?;
+            writer.u8(match blocker.kind {
+                BlockerKindV1::Dependency => 0,
+                BlockerKindV1::Decision => 1,
+                BlockerKindV1::External => 2,
+                BlockerKindV1::Policy => 3,
+                BlockerKindV1::Resource => 4,
+            })?;
+            match blocker.evidence {
+                None => writer.u8(0)?,
+                Some(evidence) => {
+                    writer.u8(1)?;
+                    writer.write(&evidence)?;
+                }
+            }
+            if matches!(
+                blocker.resume_to,
+                TaskStatusV1::Blocked | TaskStatusV1::Done
+            ) {
+                return Err(CheckpointError::InvalidData);
+            }
+            writer.u8(task_status_tag(blocker.resume_to))
+        }
+        (TaskStatusV1::Blocked, None) | (_, Some(_)) => Err(CheckpointError::InvalidData),
+        (_, None) => writer.u8(0),
+    }
+}
+
+const fn task_status_tag(status: TaskStatusV1) -> u8 {
+    match status {
+        TaskStatusV1::Backlog => 0,
+        TaskStatusV1::Open => 1,
+        TaskStatusV1::Blocked => 2,
+        TaskStatusV1::InProgress => 3,
+        TaskStatusV1::ReadyForReview => 4,
+        TaskStatusV1::Done => 5,
     }
 }
 
@@ -386,7 +435,7 @@ fn decode(bytes: &[u8], ceilings: RecoveryLimits) -> Result<Engine, CheckpointEr
         return Err(CheckpointError::InvalidMagic);
     }
     let version = reader.u16()?;
-    if !matches!(version, VERSION_V1 | VERSION_V2 | VERSION_V3) {
+    if !matches!(version, VERSION_V1 | VERSION_V2 | VERSION_V3 | VERSION_V4) {
         return Err(CheckpointError::UnsupportedVersion(version));
     }
     let revision = reader.u64()?;
@@ -485,7 +534,16 @@ fn decode(bytes: &[u8], ceilings: RecoveryLimits) -> Result<Engine, CheckpointEr
         }
         retained_outcomes.push_back(outcome);
     }
-    let scheduling_controls = if version == VERSION_V3 {
+    let controls_present = if version >= VERSION_V4 {
+        match reader.u8()? {
+            0 => false,
+            1 => true,
+            _ => return Err(CheckpointError::InvalidTag),
+        }
+    } else {
+        version == VERSION_V3
+    };
+    let scheduling_controls = if controls_present {
         use crate::scheduling_controls::{SchedulingEligibilityV1, SchedulingStateV1};
         let read_bool = |reader: &mut Reader<'_>| match reader.u8()? {
             0 => Ok(false),
@@ -766,6 +824,7 @@ fn decode_task(
     {
         return Err(CheckpointError::InvalidData);
     }
+    let (status, blocker) = decode_task_workflow(reader, version, &state)?;
     Ok((
         Task {
             id: TaskId::new(id),
@@ -773,6 +832,8 @@ fn decode_task(
             priority,
             dependencies,
             required_capabilities,
+            status,
+            blocker,
             state,
             attempts,
             max_attempts,
@@ -781,6 +842,87 @@ fn decode_task(
         },
         recovery,
     ))
+}
+
+fn decode_task_workflow(
+    reader: &mut Reader<'_>,
+    version: u16,
+    state: &TaskState,
+) -> Result<(TaskStatusV1, Option<TaskBlockerV1>), CheckpointError> {
+    if version < VERSION_V4 {
+        return Ok(match state {
+            TaskState::Blocked => (
+                TaskStatusV1::Blocked,
+                Some(TaskBlockerV1 {
+                    kind: BlockerKindV1::Dependency,
+                    evidence: None,
+                    resume_to: TaskStatusV1::Open,
+                }),
+            ),
+            TaskState::Ready => (TaskStatusV1::Open, None),
+            TaskState::Running(_) | TaskState::Uncertain { .. } => (TaskStatusV1::InProgress, None),
+            TaskState::Succeeded => (TaskStatusV1::ReadyForReview, None),
+            TaskState::Failed { .. } => (
+                TaskStatusV1::Blocked,
+                Some(TaskBlockerV1 {
+                    kind: BlockerKindV1::External,
+                    evidence: None,
+                    resume_to: TaskStatusV1::Open,
+                }),
+            ),
+            TaskState::Cancelled => (TaskStatusV1::Backlog, None),
+        });
+    }
+    let status = decode_task_status(reader.u8()?)?;
+    let blocker = match reader.u8()? {
+        0 => None,
+        1 if status == TaskStatusV1::Blocked => {
+            let kind = match reader.u8()? {
+                0 => BlockerKindV1::Dependency,
+                1 => BlockerKindV1::Decision,
+                2 => BlockerKindV1::External,
+                3 => BlockerKindV1::Policy,
+                4 => BlockerKindV1::Resource,
+                _ => return Err(CheckpointError::InvalidTag),
+            };
+            let evidence = match reader.u8()? {
+                0 => None,
+                1 => {
+                    let mut evidence = [0; 16];
+                    evidence.copy_from_slice(reader.take(16)?);
+                    Some(evidence)
+                }
+                _ => return Err(CheckpointError::InvalidTag),
+            };
+            let resume_to = decode_task_status(reader.u8()?)?;
+            if matches!(resume_to, TaskStatusV1::Blocked | TaskStatusV1::Done) {
+                return Err(CheckpointError::InvalidData);
+            }
+            Some(TaskBlockerV1 {
+                kind,
+                evidence,
+                resume_to,
+            })
+        }
+        1 => return Err(CheckpointError::InvalidData),
+        _ => return Err(CheckpointError::InvalidTag),
+    };
+    if (status == TaskStatusV1::Blocked) != blocker.is_some() {
+        return Err(CheckpointError::InvalidData);
+    }
+    Ok((status, blocker))
+}
+
+fn decode_task_status(tag: u8) -> Result<TaskStatusV1, CheckpointError> {
+    match tag {
+        0 => Ok(TaskStatusV1::Backlog),
+        1 => Ok(TaskStatusV1::Open),
+        2 => Ok(TaskStatusV1::Blocked),
+        3 => Ok(TaskStatusV1::InProgress),
+        4 => Ok(TaskStatusV1::ReadyForReview),
+        5 => Ok(TaskStatusV1::Done),
+        _ => Err(CheckpointError::InvalidTag),
+    }
 }
 
 fn decode_outcome(

@@ -4,7 +4,7 @@ use chronos_engine::{
     AcknowledgementError, AcknowledgementStrength, Agent, CheckpointError, CommitReceipt,
     CompletionError, Disposition, EffectKnowledge, Engine, EngineLimits, FailureDisposition,
     Operation, OutcomeDisposition, Recorder, RecoveryLimits, SnapshotRevision, Task, TaskId,
-    TaskState,
+    TaskState, TaskStatusV1,
 };
 
 #[test]
@@ -120,6 +120,7 @@ fn recovery_round_trip_preserves_terminal_ready_and_outcome_state() {
 
     let root = recovered.task(&TaskId::from("root")).unwrap();
     assert!(matches!(root.state, TaskState::Succeeded));
+    assert_eq!(root.status, TaskStatusV1::ReadyForReview);
     assert_eq!(root.priority, 9);
     assert!(root.required_capabilities.contains("rust"));
     assert_eq!(root.idempotency_key.as_deref(), Some("stable"));
@@ -127,10 +128,18 @@ fn recovery_round_trip_preserves_terminal_ready_and_outcome_state() {
         recovered.task(&TaskId::from("child")).unwrap().state,
         TaskState::Ready
     ));
+    assert_eq!(
+        recovered.task(&TaskId::from("child")).unwrap().status,
+        TaskStatusV1::Open
+    );
     assert!(matches!(
         recovered.task(&TaskId::from("cancel")).unwrap().state,
         TaskState::Cancelled
     ));
+    assert_eq!(
+        recovered.task(&TaskId::from("cancel")).unwrap().status,
+        TaskStatusV1::Backlog
+    );
     assert_eq!(
         recovered
             .retained_outcomes()
@@ -163,7 +172,7 @@ fn equivalent_engines_produce_canonical_checkpoint_bytes() {
 }
 
 #[test]
-fn released_v1_minimal_fixture_remains_recoverable_after_v2_becomes_current() {
+fn released_v1_minimal_fixture_remains_recoverable_after_v4_becomes_current() {
     let hex = include_str!("fixtures/checkpoint-v1-minimal.hex").trim();
     let expected: Vec<_> = hex
         .as_bytes()
@@ -172,7 +181,7 @@ fn released_v1_minimal_fixture_remains_recoverable_after_v2_becomes_current() {
         .collect();
     let mut engine = Engine::new();
     let checkpoint = engine.prepare_checkpoint(1_000_000).unwrap();
-    assert_eq!(&checkpoint.bytes()[8..10], &2_u16.to_le_bytes());
+    assert_eq!(&checkpoint.bytes()[8..10], &4_u16.to_le_bytes());
     assert_ne!(checkpoint.bytes(), expected);
     Engine::recover_checkpoint(
         &expected,
@@ -182,7 +191,7 @@ fn released_v1_minimal_fixture_remains_recoverable_after_v2_becomes_current() {
 }
 
 #[test]
-fn released_v2_minimal_fixture_is_canonical_and_recoverable() {
+fn released_v2_minimal_fixture_remains_recoverable_after_v4_becomes_current() {
     let hex = include_str!("fixtures/checkpoint-v2-minimal.hex").trim();
     let expected: Vec<_> = hex
         .as_bytes()
@@ -192,7 +201,8 @@ fn released_v2_minimal_fixture_is_canonical_and_recoverable() {
     let mut engine = Engine::new();
     let checkpoint = engine.prepare_checkpoint(1_000_000).unwrap();
 
-    assert_eq!(checkpoint.bytes(), expected);
+    assert_eq!(&checkpoint.bytes()[8..10], &4_u16.to_le_bytes());
+    assert_ne!(checkpoint.bytes(), expected);
     let recovered = Engine::recover_checkpoint(
         &expected,
         RecoveryLimits::new(1_000_000, EngineLimits::default()),
