@@ -19,6 +19,7 @@ pub const VELLUM_BUDGET_POLICY_OWNER_V1: &str = "vellum";
 #[derive(Debug)]
 pub enum VellumOwnerReadErrorV1 {
     InvalidConfiguration,
+    Control(vellum_protocol::ServiceControlErrorV1),
     Access(vellum_protocol::ServiceAccessErrorV1),
     Refused(vellum_protocol::RefusalV1),
     InvalidResponse,

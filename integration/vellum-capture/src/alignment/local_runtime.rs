@@ -5,14 +5,17 @@
 
 use super::{
     AlignmentBasisV1, AlignmentDisclosureV1, AlignmentErrorV1, AlignmentJournalV1,
-    AlignmentLimitsV1, AlignmentRegisterV1, OwnerEvidenceRefV1,
+    AlignmentLimitsV1, AlignmentRegisterV1, OwnerEvidenceRefV1, SourceReferenceV1,
     frontier::{
-        ChronosControlTaskReadErrorV1, ChronosControlTaskSourceV1, LiveAlignmentFrontierV1,
-        MoiraCohortBindingV1, MoiraCohortFrontierSourceV1, MoiraDeliberationFrontierSourceV1,
+        BudgetPolicyFrontierSourceV1, ChronosControlTaskReadErrorV1, ChronosControlTaskSourceV1,
+        GoalFrontierSourceV1, LiveAlignmentFrontierV1, LiveFrontierErrorV1, MoiraCohortBindingV1,
+        MoiraCohortFrontierSourceV1, MoiraDeliberationFrontierSourceV1,
         OwnerComposedEvidenceFrontierSourceV1, TellusGroundingFrontierSourceV1,
-        VellumLocatorBudgetPolicyFrontierSourceV1, VellumLocatorGoalFrontierSourceV1,
+        VELLUM_WORKSPACE_LOCATOR_BINDING_REVISION_DOMAIN_V1, VellumBudgetPolicyReadErrorV1,
+        VellumGoalReadErrorV1, VellumLocatorBudgetPolicyFrontierSourceV1,
+        VellumLocatorGoalFrontierSourceV1,
     },
-    host::AlignmentHostV1,
+    host::{AlignmentFrontierV1, AlignmentHostV1},
     local::{AlignmentListenerSignalsV1, AlignmentListenerV1},
 };
 use moira_client::{
@@ -26,16 +29,16 @@ use std::{
     time::Duration,
 };
 use vellum_adapter_local_authentication::{LocalCredentialClaimProviderV1, LocalCredentialStoreV1};
+use vellum_host::annotation::{DocumentIdentity, SourceEvidence, Target};
 use vellum_transport::{AuthenticatedUnixConnector, RemoteTransport, TransportLimits};
 
 type AuthenticatedVellumTransportV1 = RemoteTransport<AuthenticatedUnixConnector>;
-type LocalGoalSourceV1 = VellumLocatorGoalFrontierSourceV1<AuthenticatedVellumTransportV1>;
+type LocalGoalSourceV1 = ReconnectingVellumGoalSourceV1;
 type LocalTaskSourceV1 = ChronosControlTaskSourceV1<chronos_local::LocalClient>;
 type LocalCohortSourceV1 = MoiraCohortFrontierSourceV1<ReconnectingDeliberationPortV1>;
 type LocalDeliberationSourceV1 = MoiraDeliberationFrontierSourceV1<ReconnectingDeliberationPortV1>;
 type LocalGroundingSourceV1 = TellusGroundingFrontierSourceV1<tellus_local_client::LocalPort>;
-type LocalBudgetSourceV1 =
-    VellumLocatorBudgetPolicyFrontierSourceV1<AuthenticatedVellumTransportV1>;
+type LocalBudgetSourceV1 = ReconnectingVellumBudgetSourceV1;
 type LocalEvidenceSourceV1 = OwnerComposedEvidenceFrontierSourceV1<
     LocalDeliberationSourceV1,
     LocalGroundingSourceV1,
@@ -48,6 +51,91 @@ pub type LocalProductAlignmentFrontierV1 = LiveAlignmentFrontierV1<
     LocalCohortSourceV1,
     LocalEvidenceSourceV1,
 >;
+
+pub struct ReconnectingVellumGoalSourceV1 {
+    socket: PathBuf,
+    credential: PathBuf,
+    timeout: Duration,
+    locator: String,
+    namespace: String,
+    identity: String,
+}
+
+impl GoalFrontierSourceV1 for ReconnectingVellumGoalSourceV1 {
+    type Error = VellumGoalReadErrorV1;
+
+    fn current_goal(
+        &mut self,
+        retained: &SourceReferenceV1,
+    ) -> Result<SourceReferenceV1, Self::Error> {
+        let client = connect_vellum(&self.socket, &self.credential, self.timeout)
+            .map_err(|_| VellumGoalReadErrorV1::InvalidConfiguration)?;
+        let mut source = VellumLocatorGoalFrontierSourceV1::new(
+            client,
+            self.locator.clone(),
+            self.namespace.clone(),
+            self.identity.clone(),
+        )?;
+        let observed = source.current_goal(retained);
+        let client = source.into_client();
+        match observed {
+            Ok(value) => client
+                .disconnect()
+                .map(|_| value)
+                .map_err(|(_, error)| VellumGoalReadErrorV1::Control(error)),
+            Err(error) => {
+                let _ = client.disconnect();
+                Err(error)
+            }
+        }
+    }
+}
+
+pub struct ReconnectingVellumBudgetSourceV1 {
+    socket: PathBuf,
+    credential: PathBuf,
+    timeout: Duration,
+    locator: String,
+    resource: String,
+    chronos_scope: String,
+    cohort: super::AlignmentCohortV1,
+    limits: AlignmentLimitsV1,
+}
+
+impl BudgetPolicyFrontierSourceV1 for ReconnectingVellumBudgetSourceV1 {
+    type Error = VellumBudgetPolicyReadErrorV1;
+
+    fn current_budget_policy(
+        &mut self,
+        chronos_scope: &str,
+        cohort: &super::AlignmentCohortV1,
+        retained: &OwnerEvidenceRefV1,
+    ) -> Result<OwnerEvidenceRefV1, Self::Error> {
+        let client = connect_vellum(&self.socket, &self.credential, self.timeout)
+            .map_err(|_| VellumBudgetPolicyReadErrorV1::InvalidConfiguration)?;
+        let mut source = VellumLocatorBudgetPolicyFrontierSourceV1::new(
+            client,
+            self.locator.clone(),
+            self.resource.clone(),
+            self.chronos_scope.clone(),
+            self.cohort.clone(),
+            self.limits,
+        )
+        .map_err(|_| VellumBudgetPolicyReadErrorV1::InvalidConfiguration)?;
+        let observed = source.current_budget_policy(chronos_scope, cohort, retained);
+        let client = source.into_client();
+        match observed {
+            Ok(value) => client
+                .disconnect()
+                .map(|_| value)
+                .map_err(|(_, error)| VellumBudgetPolicyReadErrorV1::Control(error)),
+            Err(error) => {
+                let _ = client.disconnect();
+                Err(error)
+            }
+        }
+    }
+}
 
 /// Private local endpoints and authentication material. Debug output is
 /// deliberately content-free so credential paths and bearer values cannot
@@ -132,6 +220,75 @@ pub enum LocalAlignmentBuildErrorV1 {
     MoiraConnection,
     TellusConnection,
     Listener,
+}
+
+#[derive(Debug)]
+pub enum LocalAlignmentSampleErrorV1 {
+    Build(LocalAlignmentBuildErrorV1),
+    Frontier(LiveFrontierErrorV1),
+    Artifact(VellumGoalReadErrorV1),
+}
+
+/// Resolve one configured Vellum artifact through the same authenticated,
+/// non-view-mutating owner path used by the alignment frontier. The returned
+/// source reference contains only owner identity, revision, and byte length;
+/// source bytes and credential material remain private.
+pub fn observe_local_vellum_artifact_v1(
+    socket: &Path,
+    credential: &Path,
+    timeout: Duration,
+    locator: String,
+    namespace: String,
+    identity: String,
+) -> Result<SourceReferenceV1, LocalAlignmentSampleErrorV1> {
+    let client =
+        connect_vellum(socket, credential, timeout).map_err(LocalAlignmentSampleErrorV1::Build)?;
+    let bootstrap = SourceReferenceV1 {
+        document: DocumentIdentity {
+            namespace: namespace.clone(),
+            value: identity.clone(),
+        },
+        target: Target::Document {
+            source: SourceEvidence {
+                domain: VELLUM_WORKSPACE_LOCATOR_BINDING_REVISION_DOMAIN_V1.into(),
+                token: "bootstrap-selector-only".into(),
+                byte_length: 0,
+            },
+        },
+    };
+    let mut source = VellumLocatorGoalFrontierSourceV1::new(client, locator, namespace, identity)
+        .map_err(LocalAlignmentSampleErrorV1::Artifact)?;
+    let observed = source.current_goal(&bootstrap);
+    let client = source.into_client();
+    match observed {
+        Ok(value) => client.disconnect().map(|_| value).map_err(|(_, error)| {
+            LocalAlignmentSampleErrorV1::Artifact(VellumGoalReadErrorV1::Control(error))
+        }),
+        Err(error) => {
+            let _ = client.disconnect();
+            Err(LocalAlignmentSampleErrorV1::Artifact(error))
+        }
+    }
+}
+
+/// Resolve one bootstrap basis into an exact, twice-sampled current basis
+/// through every configured owner. The bootstrap supplies selectors only:
+/// exact goal identity, control-task incarnation, cohort, and budget resource.
+/// Its revisions, task snapshot, and evidence vectors are never accepted as
+/// current facts. This function cannot create a proposal, mutate an owner, or
+/// satisfy a human gate.
+pub fn sample_local_product_alignment_v1(
+    bootstrap: AlignmentBasisV1,
+    binding: LocalAlignmentBindingV1,
+    connections: LocalAlignmentConnectionsV1,
+    limits: AlignmentLimitsV1,
+) -> Result<AlignmentBasisV1, LocalAlignmentSampleErrorV1> {
+    let scope = bootstrap.chronos_scope().to_owned();
+    let mut frontier = connect_local_product_alignment_v1(bootstrap, binding, connections, limits)
+        .map_err(LocalAlignmentSampleErrorV1::Build)?;
+    frontier
+        .current(&scope)
+        .map_err(LocalAlignmentSampleErrorV1::Frontier)
 }
 
 /// Bound local read-only service. The caller still owns signal installation,
@@ -235,23 +392,14 @@ pub fn connect_local_product_alignment_v1(
         return Err(LocalAlignmentBuildErrorV1::InvalidConfiguration);
     }
 
-    let goal_client = connect_vellum(
-        &connections.vellum_socket,
-        &connections.vellum_credential,
-        connections.timeout,
-    )?;
-    let budget_client = connect_vellum(
-        &connections.vellum_socket,
-        &connections.vellum_credential,
-        connections.timeout,
-    )?;
-    let goal = VellumLocatorGoalFrontierSourceV1::new(
-        goal_client,
-        binding.goal_locator,
-        retained.goal().document.namespace.clone(),
-        retained.goal().document.value.clone(),
-    )
-    .map_err(|_| LocalAlignmentBuildErrorV1::InvalidConfiguration)?;
+    let goal = ReconnectingVellumGoalSourceV1 {
+        socket: connections.vellum_socket.clone(),
+        credential: connections.vellum_credential.clone(),
+        timeout: connections.timeout,
+        locator: binding.goal_locator,
+        namespace: retained.goal().document.namespace.clone(),
+        identity: retained.goal().document.value.clone(),
+    };
     let task = ChronosControlTaskSourceV1::new(
         chronos_local::LocalClient::new(connections.chronos_directory),
         limits.max_field_bytes,
@@ -305,15 +453,16 @@ pub fn connect_local_product_alignment_v1(
         limits,
     )
     .map_err(map_alignment_error)?;
-    let budget_source = VellumLocatorBudgetPolicyFrontierSourceV1::new(
-        budget_client,
-        binding.budget_policy_locator,
-        binding.budget_policy_resource,
-        binding.chronos_scope,
+    let budget_source = ReconnectingVellumBudgetSourceV1 {
+        socket: connections.vellum_socket,
+        credential: connections.vellum_credential,
+        timeout: connections.timeout,
+        locator: binding.budget_policy_locator,
+        resource: binding.budget_policy_resource,
+        chronos_scope: binding.chronos_scope,
         cohort,
         limits,
-    )
-    .map_err(map_alignment_error)?;
+    };
     let retained_budget_policy: OwnerEvidenceRefV1 = retained.budget_policy().clone();
     let evidence = OwnerComposedEvidenceFrontierSourceV1::new(
         deliberation_source,

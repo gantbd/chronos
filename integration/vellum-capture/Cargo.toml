@@ -19,6 +19,8 @@ alignment-local = [
     "dep:vellum-adapter-local-authentication",
     "dep:vellum-transport",
     "moira-client/unix",
+    "dep:serde",
+    "dep:serde_json",
 ]
 
 [dependencies]
@@ -39,11 +41,23 @@ keystone-observe = { path = "../../../keystone/crates/keystone-observe", version
 chronos-adapter-checkpoint = { path = "../../adapters/checkpoint", version = "=0.1.0" }
 vellum-engine = { path = "../../../vellum/engine/vellum-engine", version = "=0.1.0" }
 rustix = { version = "=1.1.6", features = ["event", "fs", "process"] }
+serde = { version = "1.0", features = ["derive"], optional = true }
+serde_json = { version = "1.0", optional = true }
 
 [[bin]]
 name = "vellum-chronos-workbench"
 path = "src/bin/workbench.rs"
 required-features = ["workbench"]
+
+[[bin]]
+name = "chronos-product-alignment-local"
+path = "src/bin/product_alignment_local.rs"
+required-features = ["alignment-local"]
+
+[[bin]]
+name = "chronos-alignment-control-admit"
+path = "src/bin/alignment_control_admit.rs"
+required-features = ["alignment-local"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 chronos-local = { path = "../../transport/chronos-local", version = "=0.1.0", optional = true }

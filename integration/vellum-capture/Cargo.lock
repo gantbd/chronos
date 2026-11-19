@@ -232,6 +232,8 @@ dependencies = [
  "moira-protocol",
  "pantheon",
  "rustix",
+ "serde",
+ "serde_json",
  "tellus",
  "tellus-local-client",
  "vellum-adapter-local-authentication",
