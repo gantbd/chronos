@@ -5,8 +5,8 @@
 //! and complete evidence frontier twice and refuses a changing aggregate.
 
 use super::{
-    AlignmentBasisV1, AlignmentCohortV1, AlignmentLimitsV1, OwnerEvidenceRefV1, SourceReferenceV1,
-    host::AlignmentFrontierV1,
+    AlignmentBasisV1, AlignmentCohortV1, AlignmentErrorV1, AlignmentLimitsV1, OwnerEvidenceRefV1,
+    PrincipalRefV1, SourceReferenceV1, host::AlignmentFrontierV1,
 };
 use chronos_sdk_embedded::engine::{RevisionedTaskSnapshotV1, TaskRefV1};
 use vellum_host::annotation::{SourceEvidence, Target};
@@ -233,6 +233,175 @@ where
                 max_attempts: entry.snapshot.max_attempts,
             },
         })
+    }
+}
+
+/// Explicit correspondence between the three attributed alignment positions
+/// and three Moira stakeholder principals in one exact deliberation. The
+/// correspondence is configuration, never inferred from a persona lens, model,
+/// provider, or member ordering.
+#[derive(Clone, Eq, PartialEq)]
+pub struct MoiraCohortBindingV1 {
+    chronos_scope: String,
+    deliberation: moira_protocol::deliberation::DeliberationIdV1,
+    stakeholder_principals: [[u8; 16]; 3],
+    cohort: AlignmentCohortV1,
+}
+
+impl std::fmt::Debug for MoiraCohortBindingV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("MoiraCohortBindingV1(<opaque>)")
+    }
+}
+
+impl MoiraCohortBindingV1 {
+    pub fn new(
+        chronos_scope: String,
+        deliberation: moira_protocol::deliberation::DeliberationIdV1,
+        external_advocate: ([u8; 16], PrincipalRefV1),
+        product_manager: ([u8; 16], PrincipalRefV1),
+        frontier_supervisor: ([u8; 16], PrincipalRefV1),
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, AlignmentErrorV1> {
+        super::validate_field(&chronos_scope, limits)?;
+        let stakeholder_principals = [
+            external_advocate.0,
+            product_manager.0,
+            frontier_supervisor.0,
+        ];
+        if stakeholder_principals[0] == stakeholder_principals[1]
+            || stakeholder_principals[0] == stakeholder_principals[2]
+            || stakeholder_principals[1] == stakeholder_principals[2]
+        {
+            return Err(AlignmentErrorV1::Invalid);
+        }
+        let cohort = AlignmentCohortV1::new(
+            external_advocate.1,
+            product_manager.1,
+            frontier_supervisor.1,
+        )?;
+        Ok(Self {
+            chronos_scope,
+            deliberation,
+            stakeholder_principals,
+            cohort,
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum MoiraCohortReadErrorV1<E> {
+    InvalidConfiguration,
+    Transport(E),
+    Refused,
+    Missing,
+    ReopenRequired,
+    InvalidResponse,
+    Unstable,
+    EnsembleNotAdmitted,
+    BoundStakeholderMissing,
+}
+
+/// Read-only Moira cohort verifier for one exact deliberation. Global Moira
+/// status brackets the deliberation read so a concurrent owner mutation is
+/// refused as unstable rather than combined with stale stakeholder standing.
+pub struct MoiraCohortFrontierSourceV1<P> {
+    client: moira_client::DeliberationReadOnlyClient<P>,
+    binding: MoiraCohortBindingV1,
+}
+
+impl<P> MoiraCohortFrontierSourceV1<P>
+where
+    P: moira_client::DeliberationServicePort,
+{
+    pub fn new(port: P, binding: MoiraCohortBindingV1) -> Self {
+        Self {
+            client: moira_client::DeliberationReadOnlyClient::new(port),
+            binding,
+        }
+    }
+
+    pub fn into_port(self) -> P {
+        self.client.into_port()
+    }
+
+    fn status(
+        &mut self,
+    ) -> Result<moira_protocol::deliberation::StatusV1, MoiraCohortReadErrorV1<P::Error>> {
+        use moira_protocol::deliberation::{OutcomeV1, ReplyV1};
+
+        match self
+            .client
+            .status()
+            .map_err(MoiraCohortReadErrorV1::Transport)?
+        {
+            ReplyV1::Accepted(OutcomeV1::Status(status)) => Ok(status),
+            ReplyV1::Refused(_) => Err(MoiraCohortReadErrorV1::Refused),
+            ReplyV1::Accepted(_) => Err(MoiraCohortReadErrorV1::InvalidResponse),
+        }
+    }
+
+    fn deliberation(
+        &mut self,
+    ) -> Result<moira_protocol::deliberation::DeliberationViewV1, MoiraCohortReadErrorV1<P::Error>>
+    {
+        use moira_protocol::deliberation::{OutcomeV1, ReplyV1};
+
+        match self
+            .client
+            .deliberation(self.binding.deliberation)
+            .map_err(MoiraCohortReadErrorV1::Transport)?
+        {
+            ReplyV1::Accepted(OutcomeV1::Deliberation(Some(view))) => Ok(*view),
+            ReplyV1::Accepted(OutcomeV1::Deliberation(None)) => {
+                Err(MoiraCohortReadErrorV1::Missing)
+            }
+            ReplyV1::Refused(_) => Err(MoiraCohortReadErrorV1::Refused),
+            ReplyV1::Accepted(_) => Err(MoiraCohortReadErrorV1::InvalidResponse),
+        }
+    }
+}
+
+impl<P> CohortFrontierSourceV1 for MoiraCohortFrontierSourceV1<P>
+where
+    P: moira_client::DeliberationServicePort,
+{
+    type Error = MoiraCohortReadErrorV1<P::Error>;
+
+    fn current_cohort(
+        &mut self,
+        chronos_scope: &str,
+        retained: &AlignmentCohortV1,
+    ) -> Result<AlignmentCohortV1, Self::Error> {
+        use moira_protocol::deliberation::EnsembleFitnessV1;
+
+        if chronos_scope != self.binding.chronos_scope || retained != &self.binding.cohort {
+            return Err(MoiraCohortReadErrorV1::InvalidConfiguration);
+        }
+        let before = self.status()?;
+        if before.needs_reopen {
+            return Err(MoiraCohortReadErrorV1::ReopenRequired);
+        }
+        let view = self.deliberation()?;
+        let after = self.status()?;
+        if before != after {
+            return Err(MoiraCohortReadErrorV1::Unstable);
+        }
+        if view.plan.id != self.binding.deliberation {
+            return Err(MoiraCohortReadErrorV1::InvalidResponse);
+        }
+        if view.plan.admission.fitness != EnsembleFitnessV1::Yes {
+            return Err(MoiraCohortReadErrorV1::EnsembleNotAdmitted);
+        }
+        if !self.binding.stakeholder_principals.iter().all(|principal| {
+            view.plan
+                .members
+                .iter()
+                .any(|member| member.stakeholder.principal == *principal)
+        }) {
+            return Err(MoiraCohortReadErrorV1::BoundStakeholderMissing);
+        }
+        Ok(self.binding.cohort.clone())
     }
 }
 

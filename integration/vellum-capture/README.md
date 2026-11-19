@@ -151,9 +151,17 @@ concrete Vellum reader binds a host-configured stable document identity to one
 authorized live workspace document and consumes only `ObserveDocumentVersion`;
 the closed `vellum-workspace-source-revision-v1` evidence domain carries its
 revision and byte length without selecting a view or copying source text.
-Concrete cohort and evidence-owner readers, live document binding resolution,
+The concrete Moira cohort reader binds the three attributed alignment positions
+to three explicit stakeholder principals in one exact deliberation. It brackets
+the deliberation read with Moira status revisions and refuses concurrent owner
+change, reopen-required state, a contested/non-admitted ensemble, missing bound
+stakeholders, scope drift, or retained-cohort drift. It never infers a PM,
+advocate, or supervisor from persona lens, model, provider, or member order.
+Complete evidence-owner reading, including an owner-supported classification of
+which observed dissent remains unresolved, live document binding resolution,
 and the packaged production composition remain open; no static retained
-proposal may masquerade as the current frontier.
+proposal or conservative relabeling of every dissent digest may masquerade as
+the current frontier.
 
 ## Independent text handoff
 

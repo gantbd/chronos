@@ -1260,6 +1260,199 @@ mod tests {
         );
     }
 
+    struct MoiraCohortPort {
+        status_revisions: std::collections::VecDeque<u64>,
+        view: moira_protocol::deliberation::DeliberationViewV1,
+        commands: Vec<moira_protocol::deliberation::CommandV1>,
+    }
+
+    impl moira_client::DeliberationServicePort for MoiraCohortPort {
+        type Error = ();
+
+        fn execute(
+            &mut self,
+            command: moira_protocol::deliberation::CommandV1,
+        ) -> Result<moira_protocol::deliberation::ReplyV1, Self::Error> {
+            use moira_protocol::deliberation::{OutcomeV1, ReplyV1, StatusV1};
+
+            let reply = match command {
+                moira_protocol::deliberation::CommandV1::Status => {
+                    ReplyV1::Accepted(OutcomeV1::Status(StatusV1 {
+                        revision: self.status_revisions.pop_front().unwrap(),
+                        needs_reopen: false,
+                    }))
+                }
+                moira_protocol::deliberation::CommandV1::Deliberation { deliberation }
+                    if deliberation == self.view.plan.id =>
+                {
+                    ReplyV1::Accepted(OutcomeV1::Deliberation(Some(Box::new(self.view.clone()))))
+                }
+                _ => panic!("cohort reader issued an unexpected Moira command"),
+            };
+            self.commands.push(command);
+            Ok(reply)
+        }
+    }
+
+    fn moira_member(seed: u8) -> moira_protocol::deliberation::EnsembleMemberV1 {
+        use moira_protocol::deliberation as d;
+
+        d::EnsembleMemberV1 {
+            id: d::EnsembleMemberIdV1([seed; 16]),
+            stakeholder: d::StakeholderRefV1 {
+                principal: [seed; 16],
+                constituency_digest: [seed; 32],
+                representation: d::StakeholderRepresentationV1::ActualStakeholder,
+                accountable_principal: None,
+                mandate_digest: Some([seed.wrapping_add(1); 32]),
+                conflict_digest: None,
+            },
+            lens: d::PersonaLensV1::Researcher,
+            concern_root_digest: [seed.wrapping_add(2); 32],
+            grounding: d::GroundingRefV1 {
+                authority_digest: [seed.wrapping_add(3); 32],
+                surface_digest: [seed.wrapping_add(4); 32],
+                depth: d::SurfaceDepthV1::Activated,
+            },
+        }
+    }
+
+    fn moira_cohort_view() -> moira_protocol::deliberation::DeliberationViewV1 {
+        use moira_protocol::deliberation as d;
+
+        d::DeliberationViewV1 {
+            version: 2,
+            plan: d::DeliberationPlanV1 {
+                id: d::DeliberationIdV1([9; 16]),
+                question_digest: [10; 32],
+                method: d::MethodRefV1 {
+                    machine_digest: [11; 32],
+                    state_digest: [12; 32],
+                },
+                claims: vec![d::ClaimKindV1::Normative],
+                criteria: vec![d::CriterionV1 {
+                    id: d::CriterionIdV1([13; 16]),
+                    direction: d::CriterionDirectionV1::Maximize,
+                }],
+                candidates: vec![d::CandidateV1 {
+                    id: d::CandidateIdV1([14; 16]),
+                    scores: vec![1],
+                }],
+                admission: d::EnsembleAdmissionV1::affirmed(
+                    [15; 32], [16; 32], [17; 32], [18; 32], [19; 16],
+                ),
+                members: vec![moira_member(1), moira_member(2), moira_member(3)],
+                orthogonality: d::OrthogonalityEvidenceV1 {
+                    query_digest: [20; 32],
+                    result_digest: [21; 32],
+                    all_orthogonal: true,
+                },
+                fuel: 10,
+            },
+            limits: d::DeliberationLimitsV1 {
+                max_claims: 1,
+                max_criteria: 1,
+                max_candidates: 1,
+                max_members: 3,
+                max_evidence_per_report: 1,
+                max_dissent_per_report: 1,
+                max_fuel: 10,
+            },
+            reports: Vec::new(),
+            resolution: None,
+            human_gate_request: None,
+            human_gate_response: None,
+            remaining_fuel: 10,
+            phase: d::DeliberationPhaseV1::Collecting,
+        }
+    }
+
+    fn moira_cohort_binding() -> frontier::MoiraCohortBindingV1 {
+        frontier::MoiraCohortBindingV1::new(
+            "product-delivery".into(),
+            moira_protocol::deliberation::DeliberationIdV1([9; 16]),
+            ([1; 16], principal("external-advocate")),
+            ([2; 16], principal("product-manager")),
+            ([3; 16], principal("frontier-supervisor")),
+            limits(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn moira_cohort_reader_requires_stable_affirmed_explicit_stakeholder_bindings() {
+        use frontier::CohortFrontierSourceV1;
+
+        let retained = alignment_basis("goal-v1", 67).cohort().clone();
+        let mut source = frontier::MoiraCohortFrontierSourceV1::new(
+            MoiraCohortPort {
+                status_revisions: [7, 7].into(),
+                view: moira_cohort_view(),
+                commands: Vec::new(),
+            },
+            moira_cohort_binding(),
+        );
+        assert_eq!(
+            source
+                .current_cohort("product-delivery", &retained)
+                .unwrap(),
+            retained
+        );
+        let port = source.into_port();
+        assert!(matches!(
+            port.commands.as_slice(),
+            [
+                moira_protocol::deliberation::CommandV1::Status,
+                moira_protocol::deliberation::CommandV1::Deliberation { .. },
+                moira_protocol::deliberation::CommandV1::Status
+            ]
+        ));
+
+        let mut unstable = frontier::MoiraCohortFrontierSourceV1::new(
+            MoiraCohortPort {
+                status_revisions: [7, 8].into(),
+                view: moira_cohort_view(),
+                commands: Vec::new(),
+            },
+            moira_cohort_binding(),
+        );
+        assert!(matches!(
+            unstable.current_cohort("product-delivery", &retained),
+            Err(frontier::MoiraCohortReadErrorV1::Unstable)
+        ));
+
+        let mut missing_view = moira_cohort_view();
+        missing_view.plan.members.pop();
+        let mut missing = frontier::MoiraCohortFrontierSourceV1::new(
+            MoiraCohortPort {
+                status_revisions: [7, 7].into(),
+                view: missing_view,
+                commands: Vec::new(),
+            },
+            moira_cohort_binding(),
+        );
+        assert!(matches!(
+            missing.current_cohort("product-delivery", &retained),
+            Err(frontier::MoiraCohortReadErrorV1::BoundStakeholderMissing)
+        ));
+
+        let mut contested_view = moira_cohort_view();
+        contested_view.plan.admission.fitness =
+            moira_protocol::deliberation::EnsembleFitnessV1::Contested;
+        let mut contested = frontier::MoiraCohortFrontierSourceV1::new(
+            MoiraCohortPort {
+                status_revisions: [7, 7].into(),
+                view: contested_view,
+                commands: Vec::new(),
+            },
+            moira_cohort_binding(),
+        );
+        assert!(matches!(
+            contested.current_cohort("product-delivery", &retained),
+            Err(frontier::MoiraCohortReadErrorV1::EnsembleNotAdmitted)
+        ));
+    }
+
     struct VellumVersionTransport {
         document: vellum_protocol::WorkspaceDocumentIdV1,
         observed: Vec<vellum_protocol::CommandV1>,

@@ -228,6 +228,8 @@ dependencies = [
  "chronos-wire",
  "keystone-observe 0.0.1",
  "keystone-storage",
+ "moira-client",
+ "moira-protocol",
  "pantheon",
  "rustix",
  "vellum-adapter-local-fs",
