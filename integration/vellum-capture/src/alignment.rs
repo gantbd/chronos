@@ -22,6 +22,7 @@ pub enum AlignmentErrorV1 {
     Duplicate,
     WrongAuthor,
     NextWorkRequired,
+    NextWorkForbidden,
 }
 
 /// Opaque attributed principal identity. It is not a role activation,
@@ -249,6 +250,9 @@ impl GroomingProposalV1 {
         limits: AlignmentLimitsV1,
     ) -> Result<Self, AlignmentErrorV1> {
         validate_source(&proposal, limits)?;
+        if proposal == basis.goal {
+            return Err(AlignmentErrorV1::Invalid);
+        }
         validate_field(author.as_str(), limits)?;
         if &author != basis.cohort.product_manager() {
             return Err(AlignmentErrorV1::WrongAuthor);
@@ -260,6 +264,15 @@ impl GroomingProposalV1 {
         {
             return Err(AlignmentErrorV1::NextWorkRequired);
         }
+        if matches!(
+            recommendation,
+            GroomingRecommendationV1::ReviseGoal
+                | GroomingRecommendationV1::EscalateHuman
+                | GroomingRecommendationV1::Stop
+        ) && !recommended_next.is_empty()
+        {
+            return Err(AlignmentErrorV1::NextWorkForbidden);
+        }
         if recommended_next.len() > limits.max_next_tasks {
             return Err(AlignmentErrorV1::Limit);
         }
@@ -268,6 +281,9 @@ impl GroomingProposalV1 {
         }
         for task in &recommended_next {
             validate_task_ref(task, limits)?;
+            if task == &basis.control_task.reference {
+                return Err(AlignmentErrorV1::Invalid);
+            }
         }
         canonicalize_evidence(&mut acceptance_evidence, limits)?;
         Ok(Self {
@@ -554,6 +570,42 @@ mod tests {
                 limits(),
             ),
             Err(AlignmentErrorV1::NextWorkRequired)
+        );
+        assert_eq!(
+            GroomingProposalV1::new(
+                alignment_basis("goal-v1", 66),
+                source("proposal-v1"),
+                principal("product-manager"),
+                GroomingRecommendationV1::Stop,
+                vec![TaskRefV1::from_observation("hidden-work".into(), 1)],
+                vec![],
+                limits(),
+            ),
+            Err(AlignmentErrorV1::NextWorkForbidden)
+        );
+        assert_eq!(
+            GroomingProposalV1::new(
+                alignment_basis("goal-v1", 66),
+                source("goal-v1"),
+                principal("product-manager"),
+                GroomingRecommendationV1::ReviseGoal,
+                vec![],
+                vec![],
+                limits(),
+            ),
+            Err(AlignmentErrorV1::Invalid)
+        );
+        assert_eq!(
+            GroomingProposalV1::new(
+                alignment_basis("goal-v1", 66),
+                source("proposal-v1"),
+                principal("product-manager"),
+                GroomingRecommendationV1::Continue,
+                vec![TaskRefV1::from_observation("pm-control".into(), 1)],
+                vec![],
+                limits(),
+            ),
+            Err(AlignmentErrorV1::Invalid)
         );
     }
 
