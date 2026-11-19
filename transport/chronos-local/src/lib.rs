@@ -18,6 +18,7 @@ use std::{
 pub mod alignment;
 pub mod control;
 mod dependencies;
+pub mod dual_frontier;
 mod scheduling;
 
 pub const MAX_REQUEST_BYTES: usize = 64 * 1024;
@@ -73,6 +74,14 @@ pub fn alignment_socket_path(directory: &Path) -> PathBuf {
 
 pub fn verify_alignment_socket(directory: &Path) -> io::Result<PathBuf> {
     verify_named_socket(directory, "chronos.alignment.sock")
+}
+
+pub fn dual_frontier_socket_path(directory: &Path) -> PathBuf {
+    directory.join("chronos.dual-frontier.sock")
+}
+
+pub fn verify_dual_frontier_socket(directory: &Path) -> io::Result<PathBuf> {
+    verify_named_socket(directory, "chronos.dual-frontier.sock")
 }
 
 fn verify_named_socket(directory: &Path, name: &str) -> io::Result<PathBuf> {

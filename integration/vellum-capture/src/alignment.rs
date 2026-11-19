@@ -17,6 +17,8 @@ pub mod host;
 pub mod journal;
 #[cfg(unix)]
 pub mod local;
+#[cfg(unix)]
+mod local_endpoint;
 #[cfg(all(target_os = "macos", feature = "alignment-local"))]
 pub mod local_runtime;
 

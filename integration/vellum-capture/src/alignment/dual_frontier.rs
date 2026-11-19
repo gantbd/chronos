@@ -14,7 +14,10 @@ use chronos_sdk_embedded::engine::RevisionedTaskSnapshotV1;
 use keystone_storage::{CommitGate, CommitOutcome, Revision};
 
 mod codec;
+pub mod host;
 pub mod journal;
+#[cfg(unix)]
+pub mod local;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrontierKindV1 {
@@ -533,6 +536,23 @@ mod tests {
         }
     }
 
+    struct Frontier {
+        basis: AlignmentBasisV1,
+        unavailable: bool,
+    }
+
+    impl super::super::host::AlignmentFrontierV1 for Frontier {
+        type Error = ();
+
+        fn current(&mut self, scope: &str) -> Result<AlignmentBasisV1, Self::Error> {
+            if self.unavailable || scope != self.basis.chronos_scope() {
+                Err(())
+            } else {
+                Ok(self.basis.clone())
+            }
+        }
+    }
+
     impl DualFrontierJournalV1 for MemoryJournal {
         type Error = ();
 
@@ -717,6 +737,161 @@ mod tests {
             observed.currentness,
             chronos_protocol::alignment_v1::Currentness::GoalChanged
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_endpoint_serves_owned_pm_observation_and_drains() {
+        use chronos_client::DualFrontierWireClientV1;
+        use std::{
+            io::Write,
+            os::unix::{fs::DirBuilderExt, net::UnixStream},
+        };
+
+        let directory = std::path::PathBuf::from("/tmp").join(format!(
+            "cdf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let expected = reconciliation();
+        let basis = expected.basis().clone();
+        let register =
+            DualFrontierRegisterV1::create(MemoryJournal::default(), expected, limits()).unwrap();
+        let host = host::DualFrontierHostV1::new(
+            register,
+            Frontier {
+                basis,
+                unavailable: false,
+            },
+            Disclosure(true),
+            limits(),
+        );
+        let listener = local::DualFrontierListenerV1::bind(&directory).unwrap();
+        assert!(directory.join("chronos.dual-frontier.sock").exists());
+        assert!(local::DualFrontierListenerV1::bind(&directory).is_err());
+        let (shutdown_read, mut shutdown_write) = UnixStream::pair().unwrap();
+        let protocol_limits = public::Limits {
+            max_field_bytes: limits().max_field_bytes,
+            max_evidence: limits().max_evidence,
+        };
+        let server = std::thread::spawn(move || {
+            let mut listener = listener;
+            let mut host = host;
+            listener
+                .run_with_shutdown(&mut host, &shutdown_read, 4096, 16 * 1024, protocol_limits)
+                .unwrap();
+            listener.signals()
+        });
+        let mut client =
+            chronos_local::dual_frontier::DualFrontierLocalClient::new(&directory, protocol_limits);
+        let observe = |scope: &str| public::Request {
+            version: 1,
+            command: public::Command::Observe {
+                chronos_scope: scope.into(),
+            },
+        };
+        let response = client
+            .request_dual_frontier_v1(observe("product-delivery"))
+            .unwrap();
+        match response.outcome {
+            public::Outcome::Observed { observation } => {
+                assert_eq!(observation.author, "product-manager");
+                assert!(matches!(
+                    observation.currentness,
+                    chronos_protocol::alignment_v1::Currentness::Current
+                ));
+            }
+            public::Outcome::Refused { .. } => panic!("owned observation must be available"),
+        }
+        let response = client
+            .request_dual_frontier_v1(observe("different-owner"))
+            .unwrap();
+        assert!(matches!(
+            response.outcome,
+            public::Outcome::Refused {
+                code: public::RefusalCode::Unauthorized
+            }
+        ));
+        shutdown_write.write_all(&[1]).unwrap();
+        let signals = server.join().unwrap();
+        assert_eq!(signals.accepted, 2);
+        assert_eq!(signals.delivery_failed, 0);
+        assert!(!signals.fenced);
+        assert!(!directory.join("chronos.dual-frontier.sock").exists());
+
+        std::fs::remove_file(directory.join("dual-frontier-owner.lock")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_endpoint_fences_without_removing_its_replacement() {
+        use std::os::unix::{
+            fs::{DirBuilderExt, PermissionsExt},
+            net::UnixListener,
+        };
+
+        let directory = std::path::PathBuf::from("/tmp").join(format!(
+            "cdf-fence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let mut owner = local::DualFrontierListenerV1::bind(&directory).unwrap();
+        let path = directory.join("chronos.dual-frontier.sock");
+        let displaced = directory.join("displaced.sock");
+        std::fs::rename(&path, &displaced).unwrap();
+        let replacement = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let expected = reconciliation();
+        let basis = expected.basis().clone();
+        let register =
+            DualFrontierRegisterV1::create(MemoryJournal::default(), expected, limits()).unwrap();
+        let mut host = host::DualFrontierHostV1::new(
+            register,
+            Frontier {
+                basis,
+                unavailable: false,
+            },
+            Disclosure(true),
+            limits(),
+        );
+        assert_eq!(
+            owner
+                .serve_one(
+                    &mut host,
+                    4096,
+                    16 * 1024,
+                    public::Limits {
+                        max_field_bytes: limits().max_field_bytes,
+                        max_evidence: limits().max_evidence,
+                    },
+                )
+                .expect_err("replacement must fence the old owner"),
+            "dual-frontier endpoint ownership changed"
+        );
+        assert!(owner.signals().fenced);
+        drop(owner);
+        assert!(path.exists(), "old owner must not remove the replacement");
+
+        drop(replacement);
+        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(displaced).unwrap();
+        std::fs::remove_file(directory.join("dual-frontier-owner.lock")).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
