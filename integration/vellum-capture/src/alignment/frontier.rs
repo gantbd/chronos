@@ -14,14 +14,18 @@ use vellum_host::annotation::{SourceEvidence, Target};
 pub const VELLUM_WORKSPACE_SOURCE_REVISION_DOMAIN_V1: &str = "vellum-workspace-source-revision-v1";
 pub const VELLUM_WORKSPACE_LOCATOR_BINDING_REVISION_DOMAIN_V1: &str =
     "vellum-workspace-locator-binding-revision-v1";
+pub const VELLUM_BUDGET_POLICY_OWNER_V1: &str = "vellum";
 
 #[derive(Debug)]
-pub enum VellumGoalReadErrorV1 {
+pub enum VellumOwnerReadErrorV1 {
     InvalidConfiguration,
     Access(vellum_protocol::ServiceAccessErrorV1),
     Refused(vellum_protocol::RefusalV1),
     InvalidResponse,
 }
+
+pub type VellumGoalReadErrorV1 = VellumOwnerReadErrorV1;
+pub type VellumBudgetPolicyReadErrorV1 = VellumOwnerReadErrorV1;
 
 /// Vellum-backed goal reader for one explicitly configured live document.
 /// The stable document identity remains host configuration; the Vellum owner
@@ -160,8 +164,6 @@ where
         &mut self,
         retained: &SourceReferenceV1,
     ) -> Result<SourceReferenceV1, Self::Error> {
-        use vellum_protocol::{OutcomeV1, ReplyV1};
-
         let retained_evidence = retained.target.source();
         if retained.document.namespace != self.namespace
             || retained.document.value != self.identity
@@ -169,34 +171,8 @@ where
         {
             return Err(VellumGoalReadErrorV1::InvalidConfiguration);
         }
-        let resolution = match self
-            .client
-            .resolve_locator(self.locator.clone())
-            .map_err(VellumGoalReadErrorV1::Access)?
-        {
-            ReplyV1::Accepted(OutcomeV1::LocatorResolved(resolution)) => resolution,
-            ReplyV1::Accepted(_) => return Err(VellumGoalReadErrorV1::InvalidResponse),
-            ReplyV1::Refused(refusal) => return Err(VellumGoalReadErrorV1::Refused(refusal)),
-        };
-        let document = resolution
-            .document
-            .ok_or(VellumGoalReadErrorV1::InvalidResponse)?;
-        if document.workspace() != resolution.workspace {
-            return Err(VellumGoalReadErrorV1::InvalidResponse);
-        }
-        let observation = match self
-            .client
-            .observe_document_version(document)
-            .map_err(VellumGoalReadErrorV1::Access)?
-        {
-            ReplyV1::Accepted(OutcomeV1::DocumentVersionObserved(observation))
-                if observation.document == document =>
-            {
-                observation
-            }
-            ReplyV1::Accepted(_) => return Err(VellumGoalReadErrorV1::InvalidResponse),
-            ReplyV1::Refused(refusal) => return Err(VellumGoalReadErrorV1::Refused(refusal)),
-        };
+        let observation = observe_locator_document(&mut self.client, &self.locator)?;
+        let document = observation.document;
         Ok(with_source_evidence(
             retained,
             SourceEvidence {
@@ -210,6 +186,144 @@ where
                 byte_length: observation.byte_length,
             },
         ))
+    }
+}
+
+fn observe_locator_document<T>(
+    client: &mut vellum_client::Client<T>,
+    locator: &str,
+) -> Result<vellum_protocol::DocumentVersionObservationV1, VellumOwnerReadErrorV1>
+where
+    T: vellum_protocol::ServicePort,
+{
+    use vellum_protocol::{OutcomeV1, ReplyV1};
+
+    let resolution = match client
+        .resolve_locator(locator.to_owned())
+        .map_err(VellumOwnerReadErrorV1::Access)?
+    {
+        ReplyV1::Accepted(OutcomeV1::LocatorResolved(resolution)) => resolution,
+        ReplyV1::Accepted(_) => return Err(VellumOwnerReadErrorV1::InvalidResponse),
+        ReplyV1::Refused(refusal) => return Err(VellumOwnerReadErrorV1::Refused(refusal)),
+    };
+    let document = resolution
+        .document
+        .ok_or(VellumOwnerReadErrorV1::InvalidResponse)?;
+    if document.workspace() != resolution.workspace {
+        return Err(VellumOwnerReadErrorV1::InvalidResponse);
+    }
+    match client
+        .observe_document_version(document)
+        .map_err(VellumOwnerReadErrorV1::Access)?
+    {
+        ReplyV1::Accepted(OutcomeV1::DocumentVersionObserved(observation))
+            if observation.document == document =>
+        {
+            Ok(observation)
+        }
+        ReplyV1::Accepted(_) => Err(VellumOwnerReadErrorV1::InvalidResponse),
+        ReplyV1::Refused(refusal) => Err(VellumOwnerReadErrorV1::Refused(refusal)),
+    }
+}
+
+pub trait BudgetPolicyFrontierSourceV1 {
+    type Error;
+
+    /// Re-observe the exact retained policy artifact through its content
+    /// owner. This proves policy revision currentness, not budget enforcement.
+    fn current_budget_policy(
+        &mut self,
+        chronos_scope: &str,
+        cohort: &AlignmentCohortV1,
+        retained: &OwnerEvidenceRefV1,
+    ) -> Result<OwnerEvidenceRefV1, Self::Error>;
+}
+
+/// Vellum-backed budget-policy reader. Rich policy content stays in Vellum;
+/// the alignment frontier retains only a stable configured resource identity
+/// and the current live workspace/document/revision binding.
+pub struct VellumLocatorBudgetPolicyFrontierSourceV1<T> {
+    client: vellum_client::Client<T>,
+    locator: String,
+    resource: String,
+    chronos_scope: String,
+    cohort: AlignmentCohortV1,
+    limits: AlignmentLimitsV1,
+}
+
+impl<T> VellumLocatorBudgetPolicyFrontierSourceV1<T>
+where
+    T: vellum_protocol::ServicePort,
+{
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        client: vellum_client::Client<T>,
+        locator: String,
+        resource: String,
+        chronos_scope: String,
+        cohort: AlignmentCohortV1,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, AlignmentErrorV1> {
+        if locator.is_empty() || locator.chars().any(char::is_control) {
+            return Err(AlignmentErrorV1::Invalid);
+        }
+        for field in [&resource, &chronos_scope] {
+            super::validate_field(field, limits)?;
+        }
+        Ok(Self {
+            client,
+            locator,
+            resource,
+            chronos_scope,
+            cohort,
+            limits,
+        })
+    }
+
+    pub fn into_client(self) -> vellum_client::Client<T> {
+        self.client
+    }
+}
+
+impl<T> BudgetPolicyFrontierSourceV1 for VellumLocatorBudgetPolicyFrontierSourceV1<T>
+where
+    T: vellum_protocol::ServicePort,
+{
+    type Error = VellumBudgetPolicyReadErrorV1;
+
+    fn current_budget_policy(
+        &mut self,
+        chronos_scope: &str,
+        cohort: &AlignmentCohortV1,
+        retained: &OwnerEvidenceRefV1,
+    ) -> Result<OwnerEvidenceRefV1, Self::Error> {
+        if chronos_scope != self.chronos_scope
+            || cohort != &self.cohort
+            || retained.owner() != VELLUM_BUDGET_POLICY_OWNER_V1
+            || retained.resource() != self.resource
+        {
+            return Err(VellumBudgetPolicyReadErrorV1::InvalidConfiguration);
+        }
+        let observation = observe_locator_document(&mut self.client, &self.locator)?;
+        let document = observation.document;
+        OwnerEvidenceRefV1::new(
+            VELLUM_BUDGET_POLICY_OWNER_V1.into(),
+            self.resource.clone(),
+            format!(
+                "{}.{}.{}",
+                document.workspace().get(),
+                document.get(),
+                observation.revision
+            ),
+            self.limits,
+        )
+        .map_err(|error| {
+            if error == AlignmentErrorV1::Limit {
+                VellumBudgetPolicyReadErrorV1::InvalidConfiguration
+            } else {
+                VellumBudgetPolicyReadErrorV1::InvalidResponse
+            }
+        })
     }
 }
 
@@ -1048,6 +1162,113 @@ pub trait EvidenceFrontierSourceV1 {
         chronos_scope: &str,
         cohort: &AlignmentCohortV1,
     ) -> Result<EvidenceFrontierV1, Self::Error>;
+}
+
+#[derive(Debug)]
+pub enum OwnerComposedEvidenceFrontierErrorV1<DE, GE, BE> {
+    Deliberation(DE),
+    Grounding(GE),
+    Budget(BE),
+    Invalid,
+    Duplicate,
+    Limit,
+}
+
+/// Owner-preserving evidence composition for the recurring PM frontier. Moira
+/// supplies deliberation facts and exact grounding requirements, Tellus proves
+/// those requirements current, and the policy owner refreshes the retained
+/// budget-policy artifact. No source may stand in for another.
+pub struct OwnerComposedEvidenceFrontierSourceV1<D, G, B> {
+    deliberation: D,
+    grounding: G,
+    budget: B,
+    retained_budget_policy: OwnerEvidenceRefV1,
+    limits: AlignmentLimitsV1,
+}
+
+impl<D, G, B> OwnerComposedEvidenceFrontierSourceV1<D, G, B> {
+    pub fn new(
+        deliberation: D,
+        grounding: G,
+        budget: B,
+        retained_budget_policy: OwnerEvidenceRefV1,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, AlignmentErrorV1> {
+        super::validate_evidence(std::slice::from_ref(&retained_budget_policy), limits)?;
+        Ok(Self {
+            deliberation,
+            grounding,
+            budget,
+            retained_budget_policy,
+            limits,
+        })
+    }
+
+    pub fn into_parts(self) -> (D, G, B, OwnerEvidenceRefV1) {
+        (
+            self.deliberation,
+            self.grounding,
+            self.budget,
+            self.retained_budget_policy,
+        )
+    }
+}
+
+impl<D, G, B> EvidenceFrontierSourceV1 for OwnerComposedEvidenceFrontierSourceV1<D, G, B>
+where
+    D: DeliberationEvidenceFrontierSourceV1,
+    G: GroundingVerificationFrontierSourceV1,
+    B: BudgetPolicyFrontierSourceV1,
+{
+    type Error = OwnerComposedEvidenceFrontierErrorV1<D::Error, G::Error, B::Error>;
+
+    fn current_evidence(
+        &mut self,
+        chronos_scope: &str,
+        cohort: &AlignmentCohortV1,
+    ) -> Result<EvidenceFrontierV1, Self::Error> {
+        let deliberation = self
+            .deliberation
+            .current_deliberation_evidence(chronos_scope, cohort)
+            .map_err(OwnerComposedEvidenceFrontierErrorV1::Deliberation)?;
+        let grounding = self
+            .grounding
+            .current_grounding_evidence(chronos_scope, cohort, &deliberation.grounding)
+            .map_err(OwnerComposedEvidenceFrontierErrorV1::Grounding)?;
+        let budget_policy = self
+            .budget
+            .current_budget_policy(chronos_scope, cohort, &self.retained_budget_policy)
+            .map_err(OwnerComposedEvidenceFrontierErrorV1::Budget)?;
+
+        let mut evidence = deliberation.evidence_frontier;
+        evidence.extend(grounding);
+        validate_composed_evidence(&evidence, self.limits)?;
+        validate_composed_evidence(std::slice::from_ref(&budget_policy), self.limits)?;
+        for frontier in [
+            &deliberation.unresolved_dissent,
+            &deliberation.pending_human_gates,
+        ] {
+            validate_composed_evidence(frontier, self.limits)?;
+        }
+        evidence.sort();
+        Ok(EvidenceFrontierV1 {
+            budget_policy,
+            evidence_frontier: evidence,
+            unresolved_dissent: deliberation.unresolved_dissent,
+            pending_human_gates: deliberation.pending_human_gates,
+        })
+    }
+}
+
+fn validate_composed_evidence<DE, GE, BE>(
+    evidence: &[OwnerEvidenceRefV1],
+    limits: AlignmentLimitsV1,
+) -> Result<(), OwnerComposedEvidenceFrontierErrorV1<DE, GE, BE>> {
+    super::validate_evidence(evidence, limits).map_err(|error| match error {
+        AlignmentErrorV1::Limit => OwnerComposedEvidenceFrontierErrorV1::Limit,
+        AlignmentErrorV1::Duplicate => OwnerComposedEvidenceFrontierErrorV1::Duplicate,
+        _ => OwnerComposedEvidenceFrontierErrorV1::Invalid,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

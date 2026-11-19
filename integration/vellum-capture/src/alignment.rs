@@ -1719,6 +1719,144 @@ mod tests {
         ));
     }
 
+    struct DeliberationFrontierStub {
+        value: frontier::DeliberationEvidenceFrontierV1,
+        calls: usize,
+    }
+
+    impl frontier::DeliberationEvidenceFrontierSourceV1 for DeliberationFrontierStub {
+        type Error = ();
+
+        fn current_deliberation_evidence(
+            &mut self,
+            _: &str,
+            _: &AlignmentCohortV1,
+        ) -> Result<frontier::DeliberationEvidenceFrontierV1, Self::Error> {
+            self.calls += 1;
+            Ok(self.value.clone())
+        }
+    }
+
+    struct GroundingFrontierStub {
+        evidence: Vec<OwnerEvidenceRefV1>,
+        observed: Vec<frontier::GroundingEvidenceFrontierV1>,
+    }
+
+    impl frontier::GroundingVerificationFrontierSourceV1 for GroundingFrontierStub {
+        type Error = ();
+
+        fn current_grounding_evidence(
+            &mut self,
+            _: &str,
+            _: &AlignmentCohortV1,
+            requirements: &frontier::GroundingEvidenceFrontierV1,
+        ) -> Result<Vec<OwnerEvidenceRefV1>, Self::Error> {
+            self.observed.push(requirements.clone());
+            Ok(self.evidence.clone())
+        }
+    }
+
+    struct BudgetFrontierStub {
+        current: OwnerEvidenceRefV1,
+        observed: Vec<OwnerEvidenceRefV1>,
+    }
+
+    impl frontier::BudgetPolicyFrontierSourceV1 for BudgetFrontierStub {
+        type Error = ();
+
+        fn current_budget_policy(
+            &mut self,
+            _: &str,
+            _: &AlignmentCohortV1,
+            retained: &OwnerEvidenceRefV1,
+        ) -> Result<OwnerEvidenceRefV1, Self::Error> {
+            self.observed.push(retained.clone());
+            Ok(self.current.clone())
+        }
+    }
+
+    #[test]
+    fn owner_composer_joins_moira_tellus_and_budget_policy_without_substitution() {
+        use frontier::EvidenceFrontierSourceV1;
+
+        let mut wide_limits = limits();
+        wide_limits.max_evidence = 16;
+        let cohort = alignment_basis("goal-v1", 67).cohort().clone();
+        let retained_budget = evidence("vellum", "delivery-budget-policy", "3.7.8");
+        let current_budget = evidence("vellum", "delivery-budget-policy", "3.7.9");
+        let requirements = grounding_requirements();
+        let mut source = frontier::OwnerComposedEvidenceFrontierSourceV1::new(
+            DeliberationFrontierStub {
+                value: frontier::DeliberationEvidenceFrontierV1 {
+                    evidence_frontier: vec![evidence("moira", "deliberation/09", "7")],
+                    unresolved_dissent: vec![evidence("moira", "dissent/1f", "22")],
+                    pending_human_gates: vec![evidence("moira", "human-gate/23", "27")],
+                    grounding: requirements.clone(),
+                },
+                calls: 0,
+            },
+            GroundingFrontierStub {
+                evidence: vec![evidence("tellus", "grounding/source/method", "11")],
+                observed: Vec::new(),
+            },
+            BudgetFrontierStub {
+                current: current_budget.clone(),
+                observed: Vec::new(),
+            },
+            retained_budget.clone(),
+            wide_limits,
+        )
+        .unwrap();
+
+        let observed = source
+            .current_evidence("product-delivery", &cohort)
+            .unwrap();
+        assert_eq!(observed.budget_policy, current_budget);
+        assert_eq!(observed.evidence_frontier.len(), 2);
+        assert_eq!(observed.unresolved_dissent.len(), 1);
+        assert_eq!(observed.pending_human_gates.len(), 1);
+        let (deliberation, grounding, budget, retained) = source.into_parts();
+        assert_eq!(deliberation.calls, 1);
+        assert_eq!(grounding.observed, vec![requirements]);
+        assert_eq!(budget.observed, vec![retained_budget.clone()]);
+        assert_eq!(retained, retained_budget);
+    }
+
+    #[test]
+    fn owner_composer_refuses_duplicate_cross_owner_evidence() {
+        use frontier::EvidenceFrontierSourceV1;
+
+        let cohort = alignment_basis("goal-v1", 67).cohort().clone();
+        let duplicate = evidence("tellus", "same", "1");
+        let retained_budget = evidence("vellum", "delivery-budget-policy", "3.7.8");
+        let mut source = frontier::OwnerComposedEvidenceFrontierSourceV1::new(
+            DeliberationFrontierStub {
+                value: frontier::DeliberationEvidenceFrontierV1 {
+                    evidence_frontier: vec![duplicate.clone()],
+                    unresolved_dissent: Vec::new(),
+                    pending_human_gates: Vec::new(),
+                    grounding: grounding_requirements(),
+                },
+                calls: 0,
+            },
+            GroundingFrontierStub {
+                evidence: vec![duplicate],
+                observed: Vec::new(),
+            },
+            BudgetFrontierStub {
+                current: retained_budget.clone(),
+                observed: Vec::new(),
+            },
+            retained_budget,
+            limits(),
+        )
+        .unwrap();
+        assert!(matches!(
+            source.current_evidence("product-delivery", &cohort),
+            Err(frontier::OwnerComposedEvidenceFrontierErrorV1::Duplicate)
+        ));
+    }
+
     struct VellumVersionTransport {
         document: vellum_protocol::WorkspaceDocumentIdV1,
         observed: Vec<vellum_protocol::CommandV1>,
@@ -1806,6 +1944,7 @@ mod tests {
 
     struct VellumLocatorTransport {
         workspace: vellum_protocol::WorkspaceIdV1,
+        locator: String,
         documents: std::collections::VecDeque<vellum_protocol::WorkspaceDocumentIdV1>,
         resolved: Option<vellum_protocol::WorkspaceDocumentIdV1>,
         observed: Vec<vellum_protocol::CommandV1>,
@@ -1826,7 +1965,7 @@ mod tests {
 
             let reply = match &request.command {
                 vellum_protocol::CommandV1::ResolveLocator { locator }
-                    if locator == "/workspace/docs/goal.md" =>
+                    if locator == &self.locator =>
                 {
                     let document = self.documents.pop_front().unwrap();
                     self.resolved = Some(document);
@@ -1873,6 +2012,7 @@ mod tests {
         let second = vellum_protocol::WorkspaceDocumentIdV1::new(workspace, 6).unwrap();
         let client = vellum_client::Client::connect(VellumLocatorTransport {
             workspace,
+            locator: "/workspace/docs/goal.md".into(),
             documents: [first, second].into(),
             resolved: None,
             observed: Vec::new(),
@@ -1913,6 +2053,49 @@ mod tests {
                 vellum_protocol::CommandV1::ResolveLocator { .. },
                 vellum_protocol::CommandV1::ObserveDocumentVersion { document: observed_second }
             ] if *observed_first == first && *observed_second == second
+        ));
+    }
+
+    #[test]
+    fn vellum_budget_policy_reader_refreshes_artifact_revision_without_claiming_enforcement() {
+        use frontier::BudgetPolicyFrontierSourceV1;
+
+        let cohort = alignment_basis("goal-v1", 67).cohort().clone();
+        let workspace = vellum_protocol::WorkspaceIdV1::new(3).unwrap();
+        let first = vellum_protocol::WorkspaceDocumentIdV1::new(workspace, 7).unwrap();
+        let second = vellum_protocol::WorkspaceDocumentIdV1::new(workspace, 8).unwrap();
+        let client = vellum_client::Client::connect(VellumLocatorTransport {
+            workspace,
+            locator: "/workspace/policy/budget.md".into(),
+            documents: [first, second].into(),
+            resolved: None,
+            observed: Vec::new(),
+        })
+        .unwrap();
+        let mut source = frontier::VellumLocatorBudgetPolicyFrontierSourceV1::new(
+            client,
+            "/workspace/policy/budget.md".into(),
+            "delivery-budget-policy".into(),
+            "product-delivery".into(),
+            cohort.clone(),
+            limits(),
+        )
+        .unwrap();
+        let retained = evidence("vellum", "delivery-budget-policy", "3.6.8");
+        let first_current = source
+            .current_budget_policy("product-delivery", &cohort, &retained)
+            .unwrap();
+        let rebound = source
+            .current_budget_policy("product-delivery", &cohort, &retained)
+            .unwrap();
+        assert_eq!(first_current.owner(), "vellum");
+        assert_eq!(first_current.resource(), "delivery-budget-policy");
+        assert_eq!(first_current.revision(), "3.7.9");
+        assert_eq!(rebound.revision(), "3.8.9");
+        assert_ne!(first_current, rebound);
+        assert!(matches!(
+            source.current_budget_policy("different-scope", &cohort, &retained),
+            Err(frontier::VellumGoalReadErrorV1::InvalidConfiguration)
         ));
     }
 

@@ -178,9 +178,18 @@ requirement, and refuses stale, mismatched, reordered, oversized or transport-
 unavailable results. Only a current response becomes bounded Tellus-owned source
 and member references. Those references are currentness material, not grants;
 the Moira deliberation revision continues to bind authority requirements while
-the Tellus member reference binds member, depth and current surface. A live
-budget-policy reader and the packaged multi-owner production composition remain
-open. Live document binding no longer requires a persisted
+the Tellus member reference binds member, depth and current surface. The
+budget-policy boundary is now explicit: Vellum owns the rich accountable policy
+artifact, while execution owners remain responsible for enforcing concrete
+limits and Aegis remains responsible for effect authority. The locator-backed
+policy reader refreshes only the artifact's live workspace/document/revision
+binding for the exact scope and cohort; that revision is not enforcement proof.
+The owner composer joins the Moira fragment, exact Tellus proof and current
+Vellum policy reference, refuses duplicate or out-of-bound cross-owner evidence,
+and supplies the existing twice-sampled live frontier. It cannot substitute one
+owner for another. Packaging these readers with authenticated production ports,
+configuration and a recurring PM worker remains open. Live document binding no
+longer requires a persisted
 process-local ID: the locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
 Its evidence token includes the live workspace identity, document identity and
