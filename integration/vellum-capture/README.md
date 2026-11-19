@@ -235,9 +235,18 @@ references or the sampled alignment evidence; a human escalation must name an
 exact pending gate from that basis. The contract refuses role collapse, an
 attempt or lease without an exact task observation, false `Aligned` judgment
 in the presence of conflict/gate evidence, and invented conflict or gate
-strings. It has no mutation or acceptance method. Durable codec/journal,
-owner readers, public projection, recurring/coalesced activation, attributed
-Agora challenge and separately authorized proposal application remain open.
+strings. It has no mutation or acceptance method. Owner readers, public
+projection, recurring/coalesced activation, attributed Agora challenge and
+separately authorized proposal application remain open.
+
+The reconciliation now has an immutable durable record. Its closed V1 codec
+refuses unknown versions/tags, noncanonical evidence, truncation and tails; the
+checkpoint-backed register requires a durable acknowledgement, refuses weak or
+indeterminate creation, conflicts rather than overwriting an existing record,
+and reopens the exact reconciliation after restart. The ledger directory is
+exclusive to this record and must not be shared with the proposal register or
+Chronos service. This closes local durability only: owner readers, a public
+projection and the operational PM loop remain open.
 
 Live document binding no longer requires a persisted process-local ID: the
 locator-backed reader uses Vellum's existing exact

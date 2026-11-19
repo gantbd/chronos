@@ -10,6 +10,10 @@ use super::{
 };
 use crate::SourceReferenceV1;
 use chronos_sdk_embedded::engine::RevisionedTaskSnapshotV1;
+use keystone_storage::{CommitGate, CommitOutcome, Revision};
+
+mod codec;
+pub mod journal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FrontierKindV1 {
@@ -102,6 +106,173 @@ impl WorkerFrontierV1 {
 
     pub fn evidence(&self) -> &[OwnerEvidenceRefV1] {
         &self.evidence
+    }
+}
+
+/// Immutable durable carrier for one exact dual-frontier reconciliation. A
+/// later reconciliation uses a new owner register; this record cannot be
+/// replaced, applied, accepted, or used to transfer work.
+#[derive(Clone, Eq, PartialEq)]
+pub struct DualFrontierRecordV1 {
+    revision: u64,
+    reconciliation: DualFrontierReconciliationV1,
+}
+
+impl std::fmt::Debug for DualFrontierRecordV1 {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DualFrontierRecordV1")
+            .field("revision", &self.revision)
+            .field("reconciliation", &"<redacted>")
+            .finish()
+    }
+}
+
+impl DualFrontierRecordV1 {
+    pub const fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn reconciliation(&self) -> &DualFrontierReconciliationV1 {
+        &self.reconciliation
+    }
+}
+
+pub trait DualFrontierJournalV1 {
+    type Error;
+
+    fn load(
+        &mut self,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Option<DualFrontierRecordV1>, Self::Error>;
+
+    fn commit(
+        &mut self,
+        expected: Option<Revision>,
+        record: &DualFrontierRecordV1,
+    ) -> Result<CommitOutcome, Self::Error>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DualFrontierRegisterErrorV1 {
+    Invalid,
+    Limit,
+    Conflict,
+    Unavailable,
+    Storage,
+}
+
+pub struct DualFrontierRegisterV1<J> {
+    journal: J,
+    record: DualFrontierRecordV1,
+}
+
+impl<J: DualFrontierJournalV1> DualFrontierRegisterV1<J> {
+    pub fn create(
+        mut journal: J,
+        reconciliation: DualFrontierReconciliationV1,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, DualFrontierRegisterErrorV1> {
+        validate_dual_limits(limits)?;
+        revalidate_reconciliation(&reconciliation, limits)?;
+        if let Some(existing) = journal
+            .load(limits)
+            .map_err(|_| DualFrontierRegisterErrorV1::Storage)?
+        {
+            validate_dual_record(&existing, limits)?;
+            return Err(DualFrontierRegisterErrorV1::Conflict);
+        }
+        let record = DualFrontierRecordV1 {
+            revision: 0,
+            reconciliation,
+        };
+        let mut gate = CommitGate::new(None);
+        gate.resolve(Revision(0), journal.commit(None, &record))
+            .map_err(|_| DualFrontierRegisterErrorV1::Storage)?;
+        Ok(Self { journal, record })
+    }
+
+    pub fn open(
+        mut journal: J,
+        limits: AlignmentLimitsV1,
+    ) -> Result<Self, DualFrontierRegisterErrorV1> {
+        validate_dual_limits(limits)?;
+        let record = journal
+            .load(limits)
+            .map_err(|_| DualFrontierRegisterErrorV1::Storage)?
+            .ok_or(DualFrontierRegisterErrorV1::Unavailable)?;
+        validate_dual_record(&record, limits)?;
+        Ok(Self { journal, record })
+    }
+
+    pub fn record(&self) -> &DualFrontierRecordV1 {
+        &self.record
+    }
+
+    pub fn into_journal(self) -> J {
+        self.journal
+    }
+}
+
+fn validate_dual_limits(limits: AlignmentLimitsV1) -> Result<(), DualFrontierRegisterErrorV1> {
+    super::validate_limits(limits).map_err(|error| match error {
+        super::AlignmentRegisterErrorV1::Limit => DualFrontierRegisterErrorV1::Limit,
+        _ => DualFrontierRegisterErrorV1::Invalid,
+    })
+}
+
+fn validate_dual_record(
+    record: &DualFrontierRecordV1,
+    limits: AlignmentLimitsV1,
+) -> Result<(), DualFrontierRegisterErrorV1> {
+    if record.revision != 0 {
+        return Err(DualFrontierRegisterErrorV1::Invalid);
+    }
+    revalidate_reconciliation(&record.reconciliation, limits)
+}
+
+fn revalidate_reconciliation(
+    value: &DualFrontierReconciliationV1,
+    limits: AlignmentLimitsV1,
+) -> Result<(), DualFrontierRegisterErrorV1> {
+    let rebuild_worker = |worker: &WorkerFrontierV1| {
+        WorkerFrontierV1::new(
+            worker.kind,
+            worker.principal.clone(),
+            worker.task.clone(),
+            worker.attempt.clone(),
+            worker.lease.clone(),
+            worker.contribution.clone(),
+            worker.evidence.clone(),
+            limits,
+        )
+    };
+    let rebuilt = DualFrontierReconciliationV1::new(
+        value.basis.clone(),
+        rebuild_worker(&value.external).map_err(map_alignment_error)?,
+        rebuild_worker(&value.constrained).map_err(map_alignment_error)?,
+        value.author.clone(),
+        value.rationale.clone(),
+        value.judgment,
+        value.conflicts.clone(),
+        value.human_gate.clone(),
+        limits,
+    )
+    .map_err(map_alignment_error)?;
+    if &rebuilt != value {
+        return Err(DualFrontierRegisterErrorV1::Invalid);
+    }
+    Ok(())
+}
+
+fn map_alignment_error(error: AlignmentErrorV1) -> DualFrontierRegisterErrorV1 {
+    match error {
+        AlignmentErrorV1::Limit => DualFrontierRegisterErrorV1::Limit,
+        AlignmentErrorV1::Invalid
+        | AlignmentErrorV1::Duplicate
+        | AlignmentErrorV1::WrongAuthor
+        | AlignmentErrorV1::NextWorkRequired
+        | AlignmentErrorV1::NextWorkForbidden => DualFrontierRegisterErrorV1::Invalid,
     }
 }
 
@@ -245,8 +416,50 @@ impl WorkerFrontierV1 {
 mod tests {
     use super::super::tests::{alignment_basis, source};
     use super::*;
+    use keystone_storage::{AcknowledgementStrength, CommitOutcome, CommitReceipt};
+    use std::sync::{Arc, Mutex};
 
-    fn limits() -> AlignmentLimitsV1 {
+    #[derive(Clone, Default)]
+    struct MemoryJournal {
+        record: Arc<Mutex<Option<DualFrontierRecordV1>>>,
+        weak: bool,
+        indeterminate: bool,
+    }
+
+    impl DualFrontierJournalV1 for MemoryJournal {
+        type Error = ();
+
+        fn load(
+            &mut self,
+            _: AlignmentLimitsV1,
+        ) -> Result<Option<DualFrontierRecordV1>, Self::Error> {
+            Ok(self.record.lock().unwrap().clone())
+        }
+
+        fn commit(
+            &mut self,
+            expected: Option<Revision>,
+            record: &DualFrontierRecordV1,
+        ) -> Result<CommitOutcome, Self::Error> {
+            assert_eq!(expected, None);
+            *self.record.lock().unwrap() = Some(record.clone());
+            if self.indeterminate {
+                Ok(CommitOutcome::Indeterminate)
+            } else {
+                Ok(CommitOutcome::Committed(CommitReceipt {
+                    revision: Revision(0),
+                    mechanism: "dual-frontier-memory-test",
+                    strength: if self.weak {
+                        AcknowledgementStrength::Volatile
+                    } else {
+                        AcknowledgementStrength::Durable
+                    },
+                }))
+            }
+        }
+    }
+
+    pub(super) fn limits() -> AlignmentLimitsV1 {
         AlignmentLimitsV1 {
             max_field_bytes: 4096,
             max_evidence: 16,
@@ -277,12 +490,11 @@ mod tests {
         .unwrap()
     }
 
-    #[test]
-    fn reconciliation_keeps_frontiers_and_pm_attributable_without_control() {
+    pub(super) fn reconciliation() -> DualFrontierReconciliationV1 {
         let basis = alignment_basis("goal-v1", 66);
         let gate = basis.pending_human_gates()[0].clone();
         let conflict = basis.unresolved_dissent()[0].clone();
-        let reconciliation = DualFrontierReconciliationV1::new(
+        DualFrontierReconciliationV1::new(
             basis,
             worker(FrontierKindV1::ExternalSupervisor, "frontier-supervisor"),
             worker(FrontierKindV1::PantheonConstrainedWorker, "insider"),
@@ -290,10 +502,16 @@ mod tests {
             source("pm-reconciliation-v1"),
             ProductManagerJudgmentV1::EscalateHuman,
             vec![conflict],
-            Some(gate.clone()),
+            Some(gate),
             limits(),
         )
-        .unwrap();
+        .unwrap()
+    }
+
+    #[test]
+    fn reconciliation_keeps_frontiers_and_pm_attributable_without_control() {
+        let reconciliation = reconciliation();
+        let gate = reconciliation.human_gate().cloned().unwrap();
 
         assert_eq!(
             reconciliation.external().principal().as_str(),
@@ -302,6 +520,68 @@ mod tests {
         assert_eq!(reconciliation.constrained().principal().as_str(), "insider");
         assert_eq!(reconciliation.author().as_str(), "product-manager");
         assert_eq!(reconciliation.human_gate(), Some(&gate));
+    }
+
+    #[test]
+    fn durable_register_survives_drop_and_exact_reopen() {
+        let directory = std::env::temp_dir().join(format!(
+            "chronos-dual-frontier-register-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let expected = reconciliation();
+        {
+            let journal =
+                journal::DirectoryDualFrontierJournalV1::open(&directory, limits(), 8).unwrap();
+            let created =
+                DualFrontierRegisterV1::create(journal, expected.clone(), limits()).unwrap();
+            assert_eq!(created.record().reconciliation(), &expected);
+        }
+        {
+            let journal =
+                journal::DirectoryDualFrontierJournalV1::open(&directory, limits(), 8).unwrap();
+            let reopened = DualFrontierRegisterV1::open(journal, limits()).unwrap();
+            assert_eq!(reopened.record().reconciliation(), &expected);
+        }
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn register_refuses_weak_indeterminate_and_existing_creation() {
+        assert!(matches!(
+            DualFrontierRegisterV1::create(
+                MemoryJournal {
+                    weak: true,
+                    ..MemoryJournal::default()
+                },
+                reconciliation(),
+                limits(),
+            ),
+            Err(DualFrontierRegisterErrorV1::Storage)
+        ));
+        assert!(matches!(
+            DualFrontierRegisterV1::create(
+                MemoryJournal {
+                    indeterminate: true,
+                    ..MemoryJournal::default()
+                },
+                reconciliation(),
+                limits(),
+            ),
+            Err(DualFrontierRegisterErrorV1::Storage)
+        ));
+
+        let journal = MemoryJournal::default();
+        let shared = journal.clone();
+        DualFrontierRegisterV1::create(journal, reconciliation(), limits()).unwrap();
+        assert!(matches!(
+            DualFrontierRegisterV1::create(shared, reconciliation(), limits()),
+            Err(DualFrontierRegisterErrorV1::Conflict)
+        ));
     }
 
     #[test]

@@ -16,13 +16,24 @@ pub(super) enum AlignmentCodecErrorV1 {
     Capacity,
 }
 
-struct Writer {
+pub(super) struct Writer {
     bytes: Vec<u8>,
     max: usize,
 }
 
 impl Writer {
-    fn put(&mut self, bytes: &[u8]) -> Result<(), AlignmentCodecErrorV1> {
+    pub(super) fn new(max: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            max,
+        }
+    }
+
+    pub(super) fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    pub(super) fn put(&mut self, bytes: &[u8]) -> Result<(), AlignmentCodecErrorV1> {
         if bytes.len() > self.max.saturating_sub(self.bytes.len()) {
             return Err(AlignmentCodecErrorV1::Limit);
         }
@@ -33,7 +44,7 @@ impl Writer {
         Ok(())
     }
 
-    fn byte(&mut self, value: u8) -> Result<(), AlignmentCodecErrorV1> {
+    pub(super) fn byte(&mut self, value: u8) -> Result<(), AlignmentCodecErrorV1> {
         self.put(&[value])
     }
 
@@ -45,7 +56,7 @@ impl Writer {
         self.u32(u32::try_from(value).map_err(|_| AlignmentCodecErrorV1::Limit)?)
     }
 
-    fn u64(&mut self, value: u64) -> Result<(), AlignmentCodecErrorV1> {
+    pub(super) fn u64(&mut self, value: u64) -> Result<(), AlignmentCodecErrorV1> {
         self.put(&value.to_be_bytes())
     }
 
@@ -53,19 +64,27 @@ impl Writer {
         self.put(&value.to_be_bytes())
     }
 
-    fn text(&mut self, value: &str) -> Result<(), AlignmentCodecErrorV1> {
+    pub(super) fn text(&mut self, value: &str) -> Result<(), AlignmentCodecErrorV1> {
         self.usize(value.len())?;
         self.put(value.as_bytes())
     }
 }
 
-struct Reader<'a> {
+pub(super) struct Reader<'a> {
     bytes: &'a [u8],
     limits: AlignmentLimitsV1,
 }
 
 impl<'a> Reader<'a> {
-    fn take(&mut self, count: usize) -> Result<&'a [u8], AlignmentCodecErrorV1> {
+    pub(super) fn new(bytes: &'a [u8], limits: AlignmentLimitsV1) -> Self {
+        Self { bytes, limits }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    pub(super) fn take(&mut self, count: usize) -> Result<&'a [u8], AlignmentCodecErrorV1> {
         let (value, rest) = self
             .bytes
             .split_at_checked(count)
@@ -74,7 +93,7 @@ impl<'a> Reader<'a> {
         Ok(value)
     }
 
-    fn byte(&mut self) -> Result<u8, AlignmentCodecErrorV1> {
+    pub(super) fn byte(&mut self) -> Result<u8, AlignmentCodecErrorV1> {
         Ok(self.take(1)?[0])
     }
 
@@ -94,7 +113,7 @@ impl<'a> Reader<'a> {
         Ok(count)
     }
 
-    fn u64(&mut self) -> Result<u64, AlignmentCodecErrorV1> {
+    pub(super) fn u64(&mut self) -> Result<u64, AlignmentCodecErrorV1> {
         Ok(u64::from_be_bytes(
             self.take(8)?
                 .try_into()
@@ -114,7 +133,7 @@ impl<'a> Reader<'a> {
         usize::try_from(self.u32()?).map_err(|_| AlignmentCodecErrorV1::Limit)
     }
 
-    fn text(&mut self) -> Result<String, AlignmentCodecErrorV1> {
+    pub(super) fn text(&mut self) -> Result<String, AlignmentCodecErrorV1> {
         let count = usize::try_from(self.u32()?).map_err(|_| AlignmentCodecErrorV1::Limit)?;
         if count > self.limits.max_field_bytes {
             return Err(AlignmentCodecErrorV1::Limit);
@@ -136,28 +155,11 @@ pub(super) fn encode(
 ) -> Result<Vec<u8>, AlignmentCodecErrorV1> {
     validate_limits(limits).map_err(map_register_error)?;
     validate_record(record, limits).map_err(map_register_error)?;
-    let mut writer = Writer {
-        bytes: Vec::new(),
-        max: limits.max_record_bytes,
-    };
+    let mut writer = Writer::new(limits.max_record_bytes);
     writer.put(MAGIC)?;
     writer.u64(record.revision)?;
     let proposal = &record.proposal;
-    let basis = &proposal.basis;
-    write_source(&mut writer, &basis.goal)?;
-    writer.text(&basis.chronos_scope)?;
-    write_task_snapshot(&mut writer, &basis.control_task)?;
-    for principal in [
-        &basis.cohort.external_advocate,
-        &basis.cohort.product_manager,
-        &basis.cohort.frontier_supervisor,
-    ] {
-        writer.text(principal.as_str())?;
-    }
-    write_evidence(&mut writer, &basis.budget_policy)?;
-    write_evidence_list(&mut writer, &basis.evidence_frontier)?;
-    write_evidence_list(&mut writer, &basis.unresolved_dissent)?;
-    write_evidence_list(&mut writer, &basis.pending_human_gates)?;
+    write_basis(&mut writer, &proposal.basis)?;
     write_source(&mut writer, &proposal.proposal)?;
     writer.text(proposal.author.as_str())?;
     writer.byte(match proposal.recommendation {
@@ -172,7 +174,7 @@ pub(super) fn encode(
         write_task_ref(&mut writer, task)?;
     }
     write_evidence_list(&mut writer, &proposal.acceptance_evidence)?;
-    Ok(writer.bytes)
+    Ok(writer.finish())
 }
 
 pub(super) fn decode(
@@ -183,36 +185,12 @@ pub(super) fn decode(
     if bytes.len() > limits.max_record_bytes {
         return Err(AlignmentCodecErrorV1::Limit);
     }
-    let mut reader = Reader { bytes, limits };
+    let mut reader = Reader::new(bytes, limits);
     if reader.take(MAGIC.len())? != MAGIC {
         return Err(AlignmentCodecErrorV1::Invalid);
     }
     let revision = reader.u64()?;
-    let goal = read_source(&mut reader)?;
-    let chronos_scope = reader.text()?;
-    let control_task = read_task_snapshot(&mut reader)?;
-    let cohort = AlignmentCohortV1::new(
-        PrincipalRefV1::new(reader.text()?, limits).map_err(map_alignment_error)?,
-        PrincipalRefV1::new(reader.text()?, limits).map_err(map_alignment_error)?,
-        PrincipalRefV1::new(reader.text()?, limits).map_err(map_alignment_error)?,
-    )
-    .map_err(map_alignment_error)?;
-    let budget_policy = read_evidence(&mut reader)?;
-    let evidence_frontier = read_evidence_list(&mut reader)?;
-    let unresolved_dissent = read_evidence_list(&mut reader)?;
-    let pending_human_gates = read_evidence_list(&mut reader)?;
-    let basis = AlignmentBasisV1::new(
-        goal,
-        chronos_scope,
-        control_task,
-        cohort,
-        budget_policy,
-        evidence_frontier,
-        unresolved_dissent,
-        pending_human_gates,
-        limits,
-    )
-    .map_err(map_alignment_error)?;
+    let basis = read_basis(&mut reader)?;
     let proposal_source = read_source(&mut reader)?;
     let author = PrincipalRefV1::new(reader.text()?, limits).map_err(map_alignment_error)?;
     let recommendation = match reader.byte()? {
@@ -232,7 +210,7 @@ pub(super) fn decode(
         recommended_next.push(read_task_ref(&mut reader)?);
     }
     let acceptance_evidence = read_evidence_list(&mut reader)?;
-    if !reader.bytes.is_empty() {
+    if !reader.is_empty() {
         return Err(AlignmentCodecErrorV1::Invalid);
     }
     let proposal = GroomingProposalV1::new(
@@ -250,7 +228,50 @@ pub(super) fn decode(
     Ok(record)
 }
 
-fn write_source(
+pub(super) fn write_basis(
+    writer: &mut Writer,
+    basis: &AlignmentBasisV1,
+) -> Result<(), AlignmentCodecErrorV1> {
+    write_source(writer, &basis.goal)?;
+    writer.text(&basis.chronos_scope)?;
+    write_task_snapshot(writer, &basis.control_task)?;
+    for principal in [
+        &basis.cohort.external_advocate,
+        &basis.cohort.product_manager,
+        &basis.cohort.frontier_supervisor,
+    ] {
+        writer.text(principal.as_str())?;
+    }
+    write_evidence(writer, &basis.budget_policy)?;
+    write_evidence_list(writer, &basis.evidence_frontier)?;
+    write_evidence_list(writer, &basis.unresolved_dissent)?;
+    write_evidence_list(writer, &basis.pending_human_gates)
+}
+
+pub(super) fn read_basis(
+    reader: &mut Reader<'_>,
+) -> Result<AlignmentBasisV1, AlignmentCodecErrorV1> {
+    let limits = reader.limits;
+    AlignmentBasisV1::new(
+        read_source(reader)?,
+        reader.text()?,
+        read_task_snapshot(reader)?,
+        AlignmentCohortV1::new(
+            PrincipalRefV1::new(reader.text()?, limits).map_err(map_alignment_error)?,
+            PrincipalRefV1::new(reader.text()?, limits).map_err(map_alignment_error)?,
+            PrincipalRefV1::new(reader.text()?, limits).map_err(map_alignment_error)?,
+        )
+        .map_err(map_alignment_error)?,
+        read_evidence(reader)?,
+        read_evidence_list(reader)?,
+        read_evidence_list(reader)?,
+        read_evidence_list(reader)?,
+        limits,
+    )
+    .map_err(map_alignment_error)
+}
+
+pub(super) fn write_source(
     writer: &mut Writer,
     source: &SourceReferenceV1,
 ) -> Result<(), AlignmentCodecErrorV1> {
@@ -286,7 +307,9 @@ fn write_source(
     }
 }
 
-fn read_source(reader: &mut Reader<'_>) -> Result<SourceReferenceV1, AlignmentCodecErrorV1> {
+pub(super) fn read_source(
+    reader: &mut Reader<'_>,
+) -> Result<SourceReferenceV1, AlignmentCodecErrorV1> {
     let document = DocumentIdentity {
         namespace: reader.text()?,
         value: reader.text()?,
@@ -338,7 +361,7 @@ fn read_task_ref(reader: &mut Reader<'_>) -> Result<TaskRefV1, AlignmentCodecErr
     ))
 }
 
-fn write_task_snapshot(
+pub(super) fn write_task_snapshot(
     writer: &mut Writer,
     snapshot: &RevisionedTaskSnapshotV1,
 ) -> Result<(), AlignmentCodecErrorV1> {
@@ -370,7 +393,7 @@ fn write_task_snapshot(
     writer.u32(snapshot.task.max_attempts)
 }
 
-fn read_task_snapshot(
+pub(super) fn read_task_snapshot(
     reader: &mut Reader<'_>,
 ) -> Result<RevisionedTaskSnapshotV1, AlignmentCodecErrorV1> {
     let reference = read_task_ref(reader)?;
@@ -404,7 +427,7 @@ fn read_task_snapshot(
     })
 }
 
-fn write_evidence(
+pub(super) fn write_evidence(
     writer: &mut Writer,
     evidence: &OwnerEvidenceRefV1,
 ) -> Result<(), AlignmentCodecErrorV1> {
@@ -413,7 +436,9 @@ fn write_evidence(
     writer.text(&evidence.revision)
 }
 
-fn read_evidence(reader: &mut Reader<'_>) -> Result<OwnerEvidenceRefV1, AlignmentCodecErrorV1> {
+pub(super) fn read_evidence(
+    reader: &mut Reader<'_>,
+) -> Result<OwnerEvidenceRefV1, AlignmentCodecErrorV1> {
     OwnerEvidenceRefV1::new(
         reader.text()?,
         reader.text()?,
@@ -423,7 +448,7 @@ fn read_evidence(reader: &mut Reader<'_>) -> Result<OwnerEvidenceRefV1, Alignmen
     .map_err(map_alignment_error)
 }
 
-fn write_evidence_list(
+pub(super) fn write_evidence_list(
     writer: &mut Writer,
     evidence: &[OwnerEvidenceRefV1],
 ) -> Result<(), AlignmentCodecErrorV1> {
@@ -434,7 +459,7 @@ fn write_evidence_list(
     Ok(())
 }
 
-fn read_evidence_list(
+pub(super) fn read_evidence_list(
     reader: &mut Reader<'_>,
 ) -> Result<Vec<OwnerEvidenceRefV1>, AlignmentCodecErrorV1> {
     let count = reader.count(reader.limits.max_evidence)?;
