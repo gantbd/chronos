@@ -14,6 +14,8 @@ description = "Explicit native document-to-task capture composition"
 [features]
 workbench = ["dep:chronos-tui", "dep:pantheon", "dep:chronos-local", "dep:vellum-adapter-local-fs"]
 alignment-local = [
+    "dep:agora-client",
+    "dep:agora-protocol",
     "dep:chronos-local",
     "dep:tellus-local-client",
     "dep:vellum-adapter-local-authentication",
@@ -39,6 +41,8 @@ tellus-local-client = { path = "../../../tellus/local-client", version = "=0.1.0
 keystone-storage = { path = "../../third_party/keystone-storage-0.0.1", version = "=0.0.1-chronos.1" }
 keystone-observe = { path = "../../../keystone/crates/keystone-observe", version = "=0.0.1" }
 chronos-adapter-checkpoint = { path = "../../adapters/checkpoint", version = "=0.1.0" }
+agora-client = { path = "../../../agora/client/agora-client", version = "=0.1.0", optional = true }
+agora-protocol = { path = "../../../agora/protocol/agora-protocol", version = "=0.1.0", optional = true }
 vellum-engine = { path = "../../../vellum/engine/vellum-engine", version = "=0.1.0" }
 rustix = { version = "=1.1.6", features = ["event", "fs", "process"] }
 serde = { version = "1.0", features = ["derive"], optional = true }

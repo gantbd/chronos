@@ -13,6 +13,8 @@ use chronos_protocol::dual_frontier_v1 as public;
 use chronos_sdk_embedded::engine::RevisionedTaskSnapshotV1;
 use keystone_storage::{CommitGate, CommitOutcome, Revision};
 
+#[cfg(feature = "alignment-local")]
+pub mod agora;
 mod codec;
 pub mod frontier;
 pub mod host;
@@ -523,6 +525,9 @@ impl WorkerFrontierV1 {
 mod tests {
     use super::super::tests::{alignment_basis, source};
     use super::*;
+    use chronos_sdk_embedded::engine::{
+        StateRevision, TaskId, TaskPhase, TaskRefV1, TaskSnapshotV1,
+    };
     use keystone_storage::{AcknowledgementStrength, CommitOutcome, CommitReceipt};
     use std::{
         collections::VecDeque,
@@ -578,6 +583,22 @@ mod tests {
                 principal.as_str().to_owned(),
             ));
             self.values.pop_front().expect("bounded source sample")
+        }
+    }
+
+    struct TaskVerifier {
+        values: VecDeque<Result<RevisionedTaskSnapshotV1, &'static str>>,
+    }
+
+    impl super::super::frontier::ControlTaskFrontierSourceV1 for TaskVerifier {
+        type Error = &'static str;
+
+        fn current_task(
+            &mut self,
+            _: &str,
+            _: &TaskRefV1,
+        ) -> Result<RevisionedTaskSnapshotV1, Self::Error> {
+            self.values.pop_front().expect("bounded task verification")
         }
     }
 
@@ -648,6 +669,35 @@ mod tests {
             kind,
             principal(who),
             None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            limits(),
+        )
+        .unwrap()
+    }
+
+    fn task_snapshot(revision: u64) -> RevisionedTaskSnapshotV1 {
+        RevisionedTaskSnapshotV1 {
+            reference: TaskRefV1::from_observation(TaskId::new("worker-task"), 2),
+            revision: StateRevision::finite(revision),
+            task: TaskSnapshotV1 {
+                phase: TaskPhase::Running,
+                attempt_number: Some(1),
+                dependency_count: 0,
+                required_capability_count: 1,
+                priority: 9,
+                max_attempts: 3,
+            },
+        }
+    }
+
+    fn worker_with_task(task: RevisionedTaskSnapshotV1) -> WorkerFrontierV1 {
+        WorkerFrontierV1::new(
+            FrontierKindV1::ExternalSupervisor,
+            principal("frontier-supervisor"),
+            Some(task),
             None,
             None,
             None,
@@ -875,6 +925,54 @@ mod tests {
                 limits(),
             ),
             Err(frontier::StableWorkerFrontierErrorV1::Invalid)
+        ));
+    }
+
+    #[test]
+    fn worker_task_claim_must_match_a_fresh_chronos_observation() {
+        use frontier::{
+            TaskVerifiedWorkerFrontierErrorV1, TaskVerifiedWorkerFrontierSourceV1,
+            WorkerFrontierSourceV1,
+        };
+
+        let published = task_snapshot(4);
+        let position = worker_with_task(published.clone());
+        let mut verified = TaskVerifiedWorkerFrontierSourceV1::new(
+            WorkerSource {
+                values: VecDeque::from([Ok(position.clone())]),
+                calls: Vec::new(),
+            },
+            TaskVerifier {
+                values: VecDeque::from([Ok(published)]),
+            },
+        );
+        assert_eq!(
+            verified
+                .current(
+                    "product-delivery",
+                    FrontierKindV1::ExternalSupervisor,
+                    &principal("frontier-supervisor"),
+                )
+                .unwrap(),
+            position
+        );
+
+        let mut stale = TaskVerifiedWorkerFrontierSourceV1::new(
+            WorkerSource {
+                values: VecDeque::from([Ok(worker_with_task(task_snapshot(4)))]),
+                calls: Vec::new(),
+            },
+            TaskVerifier {
+                values: VecDeque::from([Ok(task_snapshot(5))]),
+            },
+        );
+        assert!(matches!(
+            stale.current(
+                "product-delivery",
+                FrontierKindV1::ExternalSupervisor,
+                &principal("frontier-supervisor"),
+            ),
+            Err(TaskVerifiedWorkerFrontierErrorV1::TaskChanged)
         ));
     }
 

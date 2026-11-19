@@ -2,7 +2,9 @@
 //! the product manager. Sources publish facts; this sampler cannot infer them.
 
 use super::{FrontierKindV1, WorkerFrontierV1};
-use crate::alignment::{AlignmentBasisV1, AlignmentLimitsV1, PrincipalRefV1};
+use crate::alignment::{
+    AlignmentBasisV1, AlignmentLimitsV1, PrincipalRefV1, frontier::ControlTaskFrontierSourceV1,
+};
 
 /// One worker-owned observation port. Implementations decide how the named
 /// principal authenticates and publishes its position; the caller pre-binds
@@ -16,6 +18,61 @@ pub trait WorkerFrontierSourceV1 {
         kind: FrontierKindV1,
         principal: &PrincipalRefV1,
     ) -> Result<WorkerFrontierV1, Self::Error>;
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum TaskVerifiedWorkerFrontierErrorV1<S, V> {
+    Source(S),
+    Verifier(V),
+    TaskChanged,
+}
+
+/// Re-observes a worker-supplied task through Chronos's own read port. Attempt,
+/// lease, contribution and other evidence remain references to their named
+/// owners; this decorator makes no claim that task verification proves them.
+pub struct TaskVerifiedWorkerFrontierSourceV1<S, V> {
+    source: S,
+    verifier: V,
+}
+
+impl<S, V> TaskVerifiedWorkerFrontierSourceV1<S, V> {
+    pub fn new(source: S, verifier: V) -> Self {
+        Self { source, verifier }
+    }
+
+    pub fn into_parts(self) -> (S, V) {
+        (self.source, self.verifier)
+    }
+}
+
+impl<S, V> WorkerFrontierSourceV1 for TaskVerifiedWorkerFrontierSourceV1<S, V>
+where
+    S: WorkerFrontierSourceV1,
+    V: ControlTaskFrontierSourceV1,
+{
+    type Error = TaskVerifiedWorkerFrontierErrorV1<S::Error, V::Error>;
+
+    fn current(
+        &mut self,
+        chronos_scope: &str,
+        kind: FrontierKindV1,
+        principal: &PrincipalRefV1,
+    ) -> Result<WorkerFrontierV1, Self::Error> {
+        let position = self
+            .source
+            .current(chronos_scope, kind, principal)
+            .map_err(TaskVerifiedWorkerFrontierErrorV1::Source)?;
+        if let Some(published) = position.task() {
+            let current = self
+                .verifier
+                .current_task(chronos_scope, &published.reference)
+                .map_err(TaskVerifiedWorkerFrontierErrorV1::Verifier)?;
+            if &current != published {
+                return Err(TaskVerifiedWorkerFrontierErrorV1::TaskChanged);
+            }
+        }
+        Ok(position)
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]

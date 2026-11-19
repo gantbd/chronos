@@ -219,6 +219,8 @@ dependencies = [
 name = "chronos-vellum-capture"
 version = "0.1.0"
 dependencies = [
+ "agora-client",
+ "agora-protocol",
  "chronos-adapter-checkpoint",
  "chronos-client",
  "chronos-local",

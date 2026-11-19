@@ -260,9 +260,9 @@ stale-recovery, readiness, drain, fencing and bounded signal mechanism while
 retaining distinct sockets, locks, host policy and disclosure. Qualification
 covers a real durable-register-to-host-to-socket-to-client observation, wrong-
 scope refusal, clean drain, and replacement fencing without deleting the
-replacement. No live worker-frontier reader or recurring PM composition is
-packaged yet, so the endpoint can expose an owner-composed reconciliation but
-cannot manufacture or continuously refresh worker truth.
+replacement. The endpoint exposes only an owner-composed reconciliation; the
+worker source below can construct bounded current input, but no recurring PM
+composition continuously refreshes or replaces the immutable record.
 
 Worker acquisition now has a deterministic owner port and stability boundary.
 The external supervisor is pre-bound to the alignment cohort's exact frontier-
@@ -272,8 +272,24 @@ advocate. Each source receives the exact Chronos scope, role and principal, and
 the sampler accepts only two equal complete reads from both sources. Drift,
 role/principal substitution and malformed owner references refuse. This proves
 stable attributed input, not atomicity across owners or the truth of worker
-narration. Authenticated concrete publication adapters for the external and
-Pantheon-constrained workers remain open.
+narration. The concrete local carrier below retains that boundary; distributed
+authenticated publication remains open.
+
+The `alignment-local` composition now includes a concrete Agora/Vellum worker-
+position source. One dedicated Agora topic is the position channel for one
+pre-bound principal. The adapter scans a bounded complete history, selects the
+latest matching publication, derives contribution identity from Agora's
+message ID and sequence, and derives Vellum evidence only from owner-returned
+artifact targets. A malformed newest publication never falls back to an older
+comfortable value; incomplete pagination, withdrawn artifact targets, wrong
+scope/role/principal and self-substitution refuse. A separate decorator re-
+observes any supplied task snapshot through Chronos and requires exact equality
+before the position enters the stable two-worker sampler. Attempt and lease
+fields remain named-owner references because Chronos has no corresponding
+public read ports yet; task verification does not imply their truth. Agora's
+current local participant identity is a same-OS-user claim, not Aegis-
+authenticated identity, so this qualifies local dogfood composition rather
+than the future distributed trust boundary.
 
 Live document binding no longer requires a persisted process-local ID: the
 locator-backed reader uses Vellum's existing exact
