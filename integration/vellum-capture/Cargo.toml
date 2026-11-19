@@ -13,6 +13,13 @@ description = "Explicit native document-to-task capture composition"
 
 [features]
 workbench = ["dep:chronos-tui", "dep:pantheon", "dep:chronos-local", "dep:vellum-adapter-local-fs"]
+alignment-local = [
+    "dep:chronos-local",
+    "dep:tellus-local-client",
+    "dep:vellum-adapter-local-authentication",
+    "dep:vellum-transport",
+    "moira-client/unix",
+]
 
 [dependencies]
 chronos-client = { path = "../../client/chronos-client", version = "=0.1.0" }
@@ -26,6 +33,7 @@ vellum-protocol = { path = "../../../vellum/protocol/vellum-protocol", version =
 moira-client = { path = "../../../moira/crates/moira-client", version = "=0.1.0" }
 moira-protocol = { path = "../../../moira/crates/moira-protocol", version = "=0.1.0" }
 tellus = { path = "../../../tellus", version = "=0.1.0" }
+tellus-local-client = { path = "../../../tellus/local-client", version = "=0.1.0", optional = true }
 keystone-storage = { path = "../../third_party/keystone-storage-0.0.1", version = "=0.0.1-chronos.1" }
 keystone-observe = { path = "../../../keystone/crates/keystone-observe", version = "=0.0.1" }
 chronos-adapter-checkpoint = { path = "../../adapters/checkpoint", version = "=0.1.0" }
@@ -39,7 +47,9 @@ required-features = ["workbench"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 chronos-local = { path = "../../transport/chronos-local", version = "=0.1.0", optional = true }
+vellum-adapter-local-authentication = { path = "../../../vellum/adapters/local-authentication", version = "=0.1.0", optional = true }
 vellum-adapter-local-fs = { path = "../../../vellum/adapters/local-fs", version = "=0.1.0", optional = true }
+vellum-transport = { path = "../../../vellum/transport/vellum-transport", version = "=0.1.0", optional = true }
 chronos-tui = { path = "../../../chronos-tui", version = "=0.1.0", optional = true }
 pantheon = { path = "../../../pantheon", version = "=0.1.0", optional = true }
 vellum-service = { path = "../../../vellum/service/vellum-service", version = "=0.1.0" }

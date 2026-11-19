@@ -16,6 +16,8 @@ pub mod host;
 pub mod journal;
 #[cfg(unix)]
 pub mod local;
+#[cfg(all(target_os = "macos", feature = "alignment-local"))]
+pub mod local_runtime;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AlignmentLimitsV1 {

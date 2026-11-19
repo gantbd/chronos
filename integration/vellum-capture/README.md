@@ -187,9 +187,16 @@ binding for the exact scope and cohort; that revision is not enforcement proof.
 The owner composer joins the Moira fragment, exact Tellus proof and current
 Vellum policy reference, refuses duplicate or out-of-bound cross-owner evidence,
 and supplies the existing twice-sampled live frontier. It cannot substitute one
-owner for another. Packaging these readers with authenticated production ports,
-configuration and a recurring PM worker remains open. Live document binding no
-longer requires a persisted
+owner for another. The opt-in macOS `alignment-local` feature now packages the
+real local owner clients behind explicit configuration: Chronos reconnects per
+request; Moira reconnects per deliberation read while registry revisions bracket
+the aggregate; Tellus requires a loopback endpoint and bearer token; and the
+goal and policy each get an independently authenticated Vellum client loaded
+from the private credential store. Paths must be absolute, time/frame bounds are
+finite, ordinary debug output is redacted, and the resulting type still exposes
+only the twice-sampled read frontier. A process-separated all-owner live gate,
+composition-root configuration, listener launch and recurring PM worker remain
+open. Live document binding no longer requires a persisted
 process-local ID: the locator-backed reader uses Vellum's existing exact
 `ResolveLocator` join on every sample and then observes that document version.
 Its evidence token includes the live workspace identity, document identity and

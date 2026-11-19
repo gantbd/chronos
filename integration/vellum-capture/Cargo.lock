@@ -233,12 +233,15 @@ dependencies = [
  "pantheon",
  "rustix",
  "tellus",
+ "tellus-local-client",
+ "vellum-adapter-local-authentication",
  "vellum-adapter-local-fs",
  "vellum-client",
  "vellum-engine",
  "vellum-host",
  "vellum-protocol",
  "vellum-service",
+ "vellum-transport",
  "vellum-workspace",
 ]
 
@@ -434,6 +437,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -596,6 +600,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest",
+]
+
+[[package]]
 name = "ident_case"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -752,6 +765,7 @@ name = "moira-client"
 version = "0.1.0"
 dependencies = [
  "moira-protocol",
+ "moira-wire",
 ]
 
 [[package]]
@@ -1161,6 +1175,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "subtle"
+version = "2.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1188,6 +1208,15 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "ratatui",
+]
+
+[[package]]
+name = "tellus-local-client"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tellus",
 ]
 
 [[package]]
@@ -1265,6 +1294,18 @@ name = "unicode-width"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
+
+[[package]]
+name = "vellum-adapter-local-authentication"
+version = "0.1.0"
+dependencies = [
+ "getrandom",
+ "hmac",
+ "rustix",
+ "sha2",
+ "vellum-host",
+ "vellum-transport",
+]
 
 [[package]]
 name = "vellum-adapter-local-fs"
