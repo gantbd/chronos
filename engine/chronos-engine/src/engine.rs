@@ -201,6 +201,32 @@ pub struct TaskStatusTransitionReceiptV1 {
     pub blocker: Option<TaskBlockerV1>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskReviewDispositionV1 {
+    Accepted,
+    RevisionRequired,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TaskReviewErrorV1 {
+    TaskNotFound,
+    StaleReference,
+    StatusChanged { actual: TaskStatusV1 },
+    ExecutionNotSucceeded,
+    AttemptChanged { actual: u32 },
+    AttemptBudgetExhausted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TaskReviewReceiptV1 {
+    pub reference: TaskRefV1,
+    pub revision: StateRevision,
+    pub attempt: u32,
+    pub disposition: TaskReviewDispositionV1,
+    pub prior: TaskStatusV1,
+    pub current: TaskStatusV1,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ResolutionError {
     TaskNotFound(TaskId),
@@ -647,10 +673,10 @@ impl Engine {
                     .dependencies
                     .iter()
                     .filter(|dependency| {
-                        !matches!(
-                            self.tasks.get(*dependency).map(|task| &task.state),
-                            Some(TaskState::Succeeded)
-                        )
+                        !self
+                            .tasks
+                            .get(*dependency)
+                            .is_some_and(task_satisfies_dependencies)
                     })
                     .count(),
             },
@@ -1094,7 +1120,7 @@ impl Engine {
         let succeeded: BTreeSet<_> = self
             .tasks
             .iter()
-            .filter(|(_, task)| task.state == TaskState::Succeeded)
+            .filter(|(_, task)| task_satisfies_dependencies(task))
             .map(|(id, _)| id.clone())
             .collect();
         for (offset, task) in candidates.values_mut().enumerate() {
@@ -2005,7 +2031,7 @@ impl Engine {
         let succeeded: std::collections::BTreeSet<_> = self
             .tasks
             .iter()
-            .filter(|(_, task)| task.state == TaskState::Succeeded)
+            .filter(|(_, task)| task_satisfies_dependencies(task))
             .map(|(id, _)| id.clone())
             .collect();
         for task in self.tasks.values_mut() {
@@ -2046,6 +2072,73 @@ impl Engine {
             prior: expected,
             current: next,
             blocker,
+        })
+    }
+
+    pub fn review_task_at_revision(
+        &mut self,
+        expected: StateRevision,
+        reference: &TaskRefV1,
+        attempt: u32,
+        disposition: TaskReviewDispositionV1,
+    ) -> Result<TaskReviewReceiptV1, ConditionalError<TaskReviewErrorV1>> {
+        self.guard_revision(expected)?;
+        let task = self
+            .tasks
+            .get(reference.task_id())
+            .ok_or(ConditionalError::Domain(TaskReviewErrorV1::TaskNotFound))?;
+        if task.incarnation != Some(reference.incarnation()) {
+            return Err(ConditionalError::Domain(TaskReviewErrorV1::StaleReference));
+        }
+        if task.status != TaskStatusV1::ReadyForReview {
+            return Err(ConditionalError::Domain(TaskReviewErrorV1::StatusChanged {
+                actual: task.status,
+            }));
+        }
+        if task.state != TaskState::Succeeded {
+            return Err(ConditionalError::Domain(
+                TaskReviewErrorV1::ExecutionNotSucceeded,
+            ));
+        }
+        if attempt == 0 || task.attempts != attempt {
+            return Err(ConditionalError::Domain(
+                TaskReviewErrorV1::AttemptChanged {
+                    actual: task.attempts,
+                },
+            ));
+        }
+        if disposition == TaskReviewDispositionV1::RevisionRequired
+            && task.attempts >= task.max_attempts
+        {
+            return Err(ConditionalError::Domain(
+                TaskReviewErrorV1::AttemptBudgetExhausted,
+            ));
+        }
+
+        let current = match disposition {
+            TaskReviewDispositionV1::Accepted => TaskStatusV1::Done,
+            TaskReviewDispositionV1::RevisionRequired => TaskStatusV1::Open,
+        };
+        let task = self
+            .tasks
+            .get_mut(reference.task_id())
+            .expect("validated task must exist");
+        task.status = current;
+        task.blocker = None;
+        if disposition == TaskReviewDispositionV1::RevisionRequired {
+            task.state = TaskState::Ready;
+        }
+        self.advance_task_revision();
+        if disposition == TaskReviewDispositionV1::Accepted {
+            self.refresh_blocked();
+        }
+        Ok(TaskReviewReceiptV1 {
+            reference: reference.clone(),
+            revision: self.task_state_revision(),
+            attempt,
+            disposition,
+            prior: TaskStatusV1::ReadyForReview,
+            current,
         })
     }
 
@@ -2163,10 +2256,7 @@ fn validate_status_transition(
         ) | (
             TaskStatusV1::InProgress,
             TaskStatusV1::Open | TaskStatusV1::Blocked | TaskStatusV1::ReadyForReview
-        ) | (
-            TaskStatusV1::ReadyForReview,
-            TaskStatusV1::InProgress | TaskStatusV1::Blocked | TaskStatusV1::Done
-        )
+        ) | (TaskStatusV1::ReadyForReview, TaskStatusV1::Blocked)
     );
     if !allowed {
         return Err(TaskStatusTransitionErrorV1::InvalidTransition);
@@ -2188,6 +2278,10 @@ fn validate_status_transition(
     execution_ready
         .then_some(())
         .ok_or(TaskStatusTransitionErrorV1::ExecutionNotReady)
+}
+
+fn task_satisfies_dependencies(task: &Task) -> bool {
+    task.state == TaskState::Succeeded && task.status == TaskStatusV1::Done
 }
 
 fn attempt_identity(task: &Task) -> (Option<AttemptId>, Option<u32>) {
@@ -2326,6 +2420,15 @@ mod tests {
             .unwrap();
         assert_eq!(plan.id, TaskId::from("plan"));
         engine.complete(&plan.id, &lease(&plan), now).unwrap();
+        let plan_reference = engine.task_reference(&plan.id).unwrap();
+        engine
+            .review_task_at_revision(
+                engine.task_state_revision(),
+                &plan_reference,
+                1,
+                TaskReviewDispositionV1::Accepted,
+            )
+            .unwrap();
 
         let build = engine
             .claim_next(&grant, now, Duration::from_secs(30))

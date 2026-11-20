@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime};
 use chronos_engine::{
     Agent, CapabilityGrant, Disposition, EffectKnowledge, Engine, EngineError, EngineLimits,
     FailureDisposition, Operation, OutcomeDisposition, Recorder, ResolutionError, Task, TaskId,
-    TaskPhase, TaskState,
+    TaskPhase, TaskReviewDispositionV1, TaskState,
 };
 
 fn grant(engine: &mut Engine, agent: Agent, now: SystemTime) -> CapabilityGrant {
@@ -94,7 +94,7 @@ fn unknown_or_conflicting_evidence_cannot_resolve_uncertain_work() {
 }
 
 #[test]
-fn completed_evidence_releases_dependencies_and_failed_evidence_can_retry() {
+fn completed_evidence_awaits_review_then_acceptance_releases_dependencies() {
     let now = SystemTime::UNIX_EPOCH;
     let mut completed = Engine::new();
     completed.submit(Task::new("root", "work")).unwrap();
@@ -123,6 +123,19 @@ fn completed_evidence_releases_dependencies_and_failed_evidence_can_retry() {
         completed.task(&TaskId::from("root")).unwrap().state,
         TaskState::Succeeded
     ));
+    assert!(matches!(
+        completed.task(&TaskId::from("child")).unwrap().state,
+        TaskState::Blocked
+    ));
+    let root = completed.task_reference(&TaskId::from("root")).unwrap();
+    completed
+        .review_task_at_revision(
+            completed.task_state_revision(),
+            &root,
+            1,
+            TaskReviewDispositionV1::Accepted,
+        )
+        .unwrap();
     assert!(matches!(
         completed.task(&TaskId::from("child")).unwrap().state,
         TaskState::Ready

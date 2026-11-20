@@ -84,7 +84,7 @@ fn stale_conditional_claim_refuses_before_consuming_grant_budget_or_task_state()
 }
 
 #[test]
-fn checkpoint_v4_round_trip_preserves_task_state_revision() {
+fn checkpoint_v5_round_trip_preserves_task_state_revision() {
     let limits = chronos_engine::EngineLimits::default();
     let mut engine = Engine::new();
     engine.submit(Task::new("task", "task")).unwrap();

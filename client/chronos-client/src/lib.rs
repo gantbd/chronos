@@ -3,6 +3,14 @@
 pub mod observer;
 pub mod workbench;
 pub mod workflow;
+/// Exact human review mutation with command-scoped lost-reply reconciliation.
+pub trait ReviewWireClientV10 {
+    type Error;
+    fn request_review_v10(
+        &mut self,
+        request: chronos_protocol::review_v10::Request,
+    ) -> Result<chronos_protocol::review_v10::Response, Self::Error>;
+}
 /// Read-only authoritative workflow status. Execution phase is diagnostic only.
 pub trait WorkflowWireClientV9 {
     type Error;

@@ -19,7 +19,8 @@ const VERSION_V1: u16 = 1;
 const VERSION_V2: u16 = 2;
 const VERSION_V3: u16 = 3;
 const VERSION_V4: u16 = 4;
-const CURRENT_VERSION: u16 = VERSION_V4;
+const VERSION_V5: u16 = 5;
+const CURRENT_VERSION: u16 = VERSION_V5;
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct SnapshotRevision(u64);
@@ -435,7 +436,10 @@ fn decode(bytes: &[u8], ceilings: RecoveryLimits) -> Result<Engine, CheckpointEr
         return Err(CheckpointError::InvalidMagic);
     }
     let version = reader.u16()?;
-    if !matches!(version, VERSION_V1 | VERSION_V2 | VERSION_V3 | VERSION_V4) {
+    if !matches!(
+        version,
+        VERSION_V1 | VERSION_V2 | VERSION_V3 | VERSION_V4 | VERSION_V5
+    ) {
         return Err(CheckpointError::UnsupportedVersion(version));
     }
     let revision = reader.u64()?;
@@ -508,6 +512,7 @@ fn decode(bytes: &[u8], ceilings: RecoveryLimits) -> Result<Engine, CheckpointEr
             return Err(CheckpointError::InvalidData);
         }
     }
+    migrate_pre_review_dependency_release(&mut tasks, version);
     validate_tasks(&tasks, limits)?;
 
     let next_task_incarnation = match persisted_next_task_incarnation {
@@ -979,9 +984,9 @@ fn validate_tasks(
             return Err(CheckpointError::InvalidData);
         }
         let all_succeeded = task.dependencies.iter().all(|id| {
-            tasks
-                .get(id)
-                .is_some_and(|task| task.state == TaskState::Succeeded)
+            tasks.get(id).is_some_and(|task| {
+                task.state == TaskState::Succeeded && task.status == TaskStatusV1::Done
+            })
         });
         let terminal_dependency = task.dependencies.iter().any(|id| {
             tasks.get(id).is_some_and(|task| {
@@ -1026,6 +1031,51 @@ fn validate_tasks(
         }
     }
     Ok(())
+}
+
+/// Before V5, execution success immediately released dependents. V5 makes a
+/// named human acceptance (`Done`) the dependency-satisfaction boundary. An
+/// old checkpoint can therefore contain work that is ready but whose upstream
+/// execution is still awaiting review under the stronger law.
+///
+/// Re-block only work which has not started. Historical attempts and effects
+/// are evidence and must not be rewritten, and an old `Succeeded` task remains
+/// `ReadyForReview` rather than being promoted to an invented acceptance.
+fn migrate_pre_review_dependency_release(tasks: &mut BTreeMap<TaskId, Task>, version: u16) {
+    if version >= VERSION_V5 {
+        return;
+    }
+    let reblocked: Vec<_> = tasks
+        .iter()
+        .filter(|(_, task)| {
+            task.state == TaskState::Ready
+                && task.dependencies.iter().any(|dependency| {
+                    tasks
+                        .get(dependency)
+                        .is_some_and(|task| !task_satisfies_review_gate(task))
+                })
+        })
+        .map(|(id, task)| (id.clone(), task.status))
+        .collect();
+    for (id, previous_status) in reblocked {
+        let task = tasks
+            .get_mut(&id)
+            .expect("migration selected an existing task");
+        task.state = TaskState::Blocked;
+        task.status = TaskStatusV1::Blocked;
+        task.blocker = Some(TaskBlockerV1 {
+            kind: BlockerKindV1::Dependency,
+            evidence: None,
+            resume_to: match previous_status {
+                TaskStatusV1::Backlog | TaskStatusV1::Open => previous_status,
+                _ => TaskStatusV1::Open,
+            },
+        });
+    }
+}
+
+fn task_satisfies_review_gate(task: &Task) -> bool {
+    task.state == TaskState::Succeeded && task.status == TaskStatusV1::Done
 }
 
 fn validate_outcome(
@@ -1259,6 +1309,75 @@ impl<'a> Reader<'a> {
             Ok(())
         } else {
             Err(CheckpointError::TrailingBytes)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn task(
+        id: &str,
+        dependencies: impl IntoIterator<Item = &'static str>,
+        state: TaskState,
+        status: TaskStatusV1,
+        attempts: u32,
+        incarnation: u64,
+    ) -> Task {
+        Task {
+            id: TaskId::new(id),
+            summary: String::new(),
+            priority: 0,
+            dependencies: dependencies.into_iter().map(TaskId::new).collect(),
+            required_capabilities: BTreeSet::new(),
+            status,
+            blocker: None,
+            state,
+            attempts,
+            max_attempts: 2,
+            idempotency_key: None,
+            incarnation: Some(TaskIncarnation(incarnation)),
+        }
+    }
+
+    #[test]
+    fn v4_ready_dependents_are_reblocked_without_inventing_acceptance() {
+        let root = task(
+            "root",
+            [],
+            TaskState::Succeeded,
+            TaskStatusV1::ReadyForReview,
+            1,
+            0,
+        );
+        let child = task(
+            "child",
+            ["root"],
+            TaskState::Ready,
+            TaskStatusV1::Open,
+            0,
+            1,
+        );
+        let mut tasks = BTreeMap::from([(root.id.clone(), root), (child.id.clone(), child)]);
+
+        migrate_pre_review_dependency_release(&mut tasks, VERSION_V4);
+
+        let root = tasks.get(&TaskId::new("root")).unwrap();
+        assert_eq!(root.state, TaskState::Succeeded);
+        assert_eq!(root.status, TaskStatusV1::ReadyForReview);
+        let child = tasks.get(&TaskId::new("child")).unwrap();
+        assert_eq!(child.state, TaskState::Blocked);
+        assert_eq!(child.status, TaskStatusV1::Blocked);
+        assert_eq!(child.blocker, Some(dependency_blocker_for_test()));
+        validate_tasks(&tasks, EngineLimits::default()).unwrap();
+    }
+
+    const fn dependency_blocker_for_test() -> TaskBlockerV1 {
+        TaskBlockerV1 {
+            kind: BlockerKindV1::Dependency,
+            evidence: None,
+            resume_to: TaskStatusV1::Open,
         }
     }
 }

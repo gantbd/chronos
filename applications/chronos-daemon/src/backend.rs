@@ -516,6 +516,40 @@ impl Backend {
         }
         Ok(response)
     }
+    pub(crate) fn review_v10(
+        &mut self,
+        request: chronos_wire::review_v10::Request,
+    ) -> Result<chronos_wire::review_v10::Response, &'static str> {
+        use chronos_wire::review_v10 as wire;
+        let response = match &mut self.inner {
+            Kind::Atomic(service) => chronos_adapter_native::review_v10::response(
+                service
+                    .invoke(
+                        chronos_adapter_native::review_v10::invocation(
+                            request,
+                            chronos_local::wire_limits(),
+                        )
+                        .map_err(|_| "review invocation conversion refused")?,
+                    )
+                    .map_err(|_| "persistence fenced; review outcome unknown")?,
+            ),
+            Kind::Legacy(_) => wire::Response {
+                version: 10,
+                outcome: wire::Outcome::Refused {
+                    code: wire::RefusalCode::Unavailable,
+                },
+            },
+        };
+        if chronos_wire::encode(&response, chronos_local::MAX_RESPONSE_BYTES).is_err() {
+            return Ok(wire::Response {
+                version: 10,
+                outcome: wire::Outcome::Refused {
+                    code: wire::RefusalCode::Limit,
+                },
+            });
+        }
+        Ok(response)
+    }
     pub(crate) fn dependencies_v6(
         &mut self,
         request: chronos_wire::dependencies_v6::Request,

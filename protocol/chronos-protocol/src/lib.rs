@@ -13,6 +13,7 @@ pub mod coordination_v7;
 pub mod coordination_v8;
 pub mod dependencies_v6;
 pub mod dual_frontier_v1;
+pub mod review_v10;
 pub mod scheduling_v5;
 pub mod workflow_v9;
 

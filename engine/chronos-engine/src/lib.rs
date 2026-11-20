@@ -29,7 +29,8 @@ pub use command_v2::{CommandKindV2, CommandOutcomeV2, CommandV2, PreparedTransit
 pub use engine::{
     AdmissionReport, AdmissionRule, CancelError, ClaimError, CompletionError, ConditionalError,
     Engine, EngineError, FailureError, GrantError, ReadError, ResolutionError, RetirementError,
-    TaskStatusTransitionErrorV1, TaskStatusTransitionReceiptV1, TemporalError, TimeError,
+    TaskReviewDispositionV1, TaskReviewErrorV1, TaskReviewReceiptV1, TaskStatusTransitionErrorV1,
+    TaskStatusTransitionReceiptV1, TemporalError, TimeError,
 };
 pub use instrumentation::{Disposition, EngineUsage, Observation, Operation, Recorder};
 pub use integration::{GraphAdmissionReceiptV1, IntegrationEffectIdV1};

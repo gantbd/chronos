@@ -126,11 +126,11 @@ fn recovery_round_trip_preserves_terminal_ready_and_outcome_state() {
     assert_eq!(root.idempotency_key.as_deref(), Some("stable"));
     assert!(matches!(
         recovered.task(&TaskId::from("child")).unwrap().state,
-        TaskState::Ready
+        TaskState::Blocked
     ));
     assert_eq!(
         recovered.task(&TaskId::from("child")).unwrap().status,
-        TaskStatusV1::Open
+        TaskStatusV1::Blocked
     );
     assert!(matches!(
         recovered.task(&TaskId::from("cancel")).unwrap().state,
@@ -172,7 +172,7 @@ fn equivalent_engines_produce_canonical_checkpoint_bytes() {
 }
 
 #[test]
-fn released_v1_minimal_fixture_remains_recoverable_after_v4_becomes_current() {
+fn released_v1_minimal_fixture_remains_recoverable_after_v5_becomes_current() {
     let hex = include_str!("fixtures/checkpoint-v1-minimal.hex").trim();
     let expected: Vec<_> = hex
         .as_bytes()
@@ -181,7 +181,7 @@ fn released_v1_minimal_fixture_remains_recoverable_after_v4_becomes_current() {
         .collect();
     let mut engine = Engine::new();
     let checkpoint = engine.prepare_checkpoint(1_000_000).unwrap();
-    assert_eq!(&checkpoint.bytes()[8..10], &4_u16.to_le_bytes());
+    assert_eq!(&checkpoint.bytes()[8..10], &5_u16.to_le_bytes());
     assert_ne!(checkpoint.bytes(), expected);
     Engine::recover_checkpoint(
         &expected,
@@ -191,7 +191,7 @@ fn released_v1_minimal_fixture_remains_recoverable_after_v4_becomes_current() {
 }
 
 #[test]
-fn released_v2_minimal_fixture_remains_recoverable_after_v4_becomes_current() {
+fn released_v2_minimal_fixture_remains_recoverable_after_v5_becomes_current() {
     let hex = include_str!("fixtures/checkpoint-v2-minimal.hex").trim();
     let expected: Vec<_> = hex
         .as_bytes()
@@ -201,7 +201,7 @@ fn released_v2_minimal_fixture_remains_recoverable_after_v4_becomes_current() {
     let mut engine = Engine::new();
     let checkpoint = engine.prepare_checkpoint(1_000_000).unwrap();
 
-    assert_eq!(&checkpoint.bytes()[8..10], &4_u16.to_le_bytes());
+    assert_eq!(&checkpoint.bytes()[8..10], &5_u16.to_le_bytes());
     assert_ne!(checkpoint.bytes(), expected);
     let recovered = Engine::recover_checkpoint(
         &expected,

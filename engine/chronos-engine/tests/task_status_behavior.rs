@@ -1,8 +1,9 @@
 use std::time::{Duration, SystemTime};
 
 use chronos_engine::{
-    Agent, BlockerKindV1, ClaimError, Engine, Task, TaskBlockerV1, TaskId, TaskState,
-    TaskStatusTransitionErrorV1, TaskStatusV1,
+    Agent, BlockerKindV1, ClaimError, ConditionalError, Engine, Task, TaskBlockerV1, TaskId,
+    TaskReviewDispositionV1, TaskReviewErrorV1, TaskState, TaskStatusTransitionErrorV1,
+    TaskStatusV1,
 };
 
 #[test]
@@ -56,12 +57,21 @@ fn one_authoritative_status_controls_scheduling_and_review_completion() {
         engine.task_snapshot(&TaskId::from("work")).unwrap().status,
         TaskStatusV1::ReadyForReview
     );
-    let receipt = engine
-        .transition_task_status(
+    assert_eq!(
+        engine.transition_task_status(
             &reference,
             TaskStatusV1::ReadyForReview,
             TaskStatusV1::Done,
             None,
+        ),
+        Err(TaskStatusTransitionErrorV1::InvalidTransition)
+    );
+    let receipt = engine
+        .review_task_at_revision(
+            engine.task_state_revision(),
+            &reference,
+            1,
+            TaskReviewDispositionV1::Accepted,
         )
         .unwrap();
     assert_eq!(receipt.current, TaskStatusV1::Done);
@@ -75,6 +85,85 @@ fn one_authoritative_status_controls_scheduling_and_review_completion() {
         Err(TaskStatusTransitionErrorV1::StatusChanged {
             actual: TaskStatusV1::Done,
         })
+    );
+}
+
+#[test]
+fn dependencies_wait_for_acceptance_and_revision_requests_preserve_budget() {
+    let now = SystemTime::UNIX_EPOCH;
+    let mut engine = Engine::new();
+    engine
+        .submit_graph(vec![
+            Task::new("root", "root").with_max_attempts(2),
+            Task::new("dependent", "dependent").depends_on("root"),
+        ])
+        .unwrap();
+    let root = engine.task_reference(&TaskId::from("root")).unwrap();
+    let grant = engine
+        .issue_grant(Agent::new("worker"), now, Duration::from_secs(60))
+        .unwrap();
+    let claimed = engine
+        .claim_task(&grant, &TaskId::from("root"), now, Duration::from_secs(30))
+        .unwrap();
+    let lease = match claimed.state {
+        TaskState::Running(claim) => claim.lease,
+        state => panic!("expected running execution fact, got {state:?}"),
+    };
+    engine.complete(&TaskId::from("root"), &lease, now).unwrap();
+
+    let dependent = engine.task(&TaskId::from("dependent")).unwrap();
+    assert_eq!(dependent.status, TaskStatusV1::Blocked);
+    assert_eq!(dependent.state, TaskState::Blocked);
+
+    let revision = engine.task_state_revision();
+    let receipt = engine
+        .review_task_at_revision(
+            revision,
+            &root,
+            1,
+            TaskReviewDispositionV1::RevisionRequired,
+        )
+        .unwrap();
+    assert_eq!(receipt.current, TaskStatusV1::Open);
+    let reopened = engine.task(&TaskId::from("root")).unwrap();
+    assert_eq!(reopened.state, TaskState::Ready);
+    assert_eq!(reopened.attempts, 1);
+    assert_eq!(reopened.max_attempts, 2);
+    assert_eq!(
+        engine.task(&TaskId::from("dependent")).unwrap().state,
+        TaskState::Blocked
+    );
+
+    let claimed = engine
+        .claim_task(&grant, &TaskId::from("root"), now, Duration::from_secs(30))
+        .unwrap();
+    let lease = match claimed.state {
+        TaskState::Running(claim) => claim.lease,
+        state => panic!("expected running execution fact, got {state:?}"),
+    };
+    engine.complete(&TaskId::from("root"), &lease, now).unwrap();
+    assert_eq!(
+        engine.review_task_at_revision(
+            engine.task_state_revision(),
+            &root,
+            2,
+            TaskReviewDispositionV1::RevisionRequired,
+        ),
+        Err(ConditionalError::Domain(
+            TaskReviewErrorV1::AttemptBudgetExhausted
+        ))
+    );
+    engine
+        .review_task_at_revision(
+            engine.task_state_revision(),
+            &root,
+            2,
+            TaskReviewDispositionV1::Accepted,
+        )
+        .unwrap();
+    assert_eq!(
+        engine.task(&TaskId::from("dependent")).unwrap().state,
+        TaskState::Ready
     );
 }
 

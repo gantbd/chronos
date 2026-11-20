@@ -372,6 +372,9 @@ impl Server {
         };
         self.verify_ownership()?;
         let response = match chronos_wire::decode_profile(&frame, chronos_local::wire_limits()) {
+            Ok(chronos_wire::ProfileRequest::ReviewV10(request)) => {
+                chronos_wire::ProfileResponse::ReviewV10(self.service.review_v10(request)?)
+            }
             Ok(chronos_wire::ProfileRequest::WorkflowV9(request)) => {
                 chronos_wire::ProfileResponse::WorkflowV9(self.service.workflow_v9(request)?)
             }

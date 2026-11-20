@@ -39,7 +39,7 @@ fn retirement_refuses_while_any_active_task_references_the_incarnation() {
 }
 
 #[test]
-fn checkpoint_v4_preserves_the_high_water_mark_after_retirement() {
+fn checkpoint_v5_preserves_the_high_water_mark_after_retirement() {
     let limits = chronos_engine::EngineLimits::default();
     let mut engine = Engine::new();
     engine.submit(Task::new("reused", "first")).unwrap();
@@ -48,7 +48,7 @@ fn checkpoint_v4_preserves_the_high_water_mark_after_retirement() {
     engine.retire(&first).unwrap();
 
     let checkpoint = engine.prepare_checkpoint(1_000_000).unwrap();
-    assert_eq!(&checkpoint.bytes()[8..10], &4_u16.to_le_bytes());
+    assert_eq!(&checkpoint.bytes()[8..10], &5_u16.to_le_bytes());
     let mut recovered = Engine::recover_checkpoint(
         checkpoint.bytes(),
         chronos_engine::RecoveryLimits::new(1_000_000, limits),

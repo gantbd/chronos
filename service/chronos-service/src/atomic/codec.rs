@@ -2,7 +2,7 @@
 use super::{AtomicLimits, EnvelopeError, Retained};
 use chronos_engine::{
     RecoveryLimits, RetrySafetyV1, ScheduledTaskSpecV1, SchedulingEligibilityV1, StateRevision,
-    TaskId, TaskRefV1, TaskSpecV2,
+    TaskId, TaskRefV1, TaskReviewDispositionV1, TaskSpecV2,
 };
 use chronos_host::native_allocation::AllocationReceiptV1;
 use chronos_host::native_v3::*;
@@ -155,6 +155,16 @@ impl Writer {
                 self.byte(3)?;
                 self.byte(code as u8)
             }
+            MutationOutcomeV1::ReviewApplied {
+                revision,
+                attempt,
+                disposition,
+            } => {
+                self.byte(4)?;
+                self.revision(revision)?;
+                self.u32(attempt)?;
+                self.byte(review_disposition_tag(disposition))
+            }
         }
     }
 }
@@ -235,6 +245,11 @@ impl<'a> Reader<'a> {
         let id = TaskId::new(self.string(max)?);
         Ok(TaskRefV1::from_observation(id, self.u64()?))
     }
+    fn digest(&mut self) -> Result<[u8; 32], EnvelopeError> {
+        self.take(32)?
+            .try_into()
+            .map_err(|_| EnvelopeError::Malformed)
+    }
     fn outcome(&mut self) -> Result<MutationOutcomeV1, EnvelopeError> {
         match self.byte()? {
             0 => Ok(MutationOutcomeV1::Applied),
@@ -248,6 +263,18 @@ impl<'a> Reader<'a> {
                 .copied()
                 .map(MutationOutcomeV1::Refused)
                 .ok_or(EnvelopeError::Malformed),
+            4 => {
+                let revision = self.revision()?;
+                let attempt = self.u32()?;
+                if attempt == 0 {
+                    return Err(EnvelopeError::Malformed);
+                }
+                Ok(MutationOutcomeV1::ReviewApplied {
+                    revision,
+                    attempt,
+                    disposition: decode_review_disposition(self.byte()?)?,
+                })
+            }
             _ => Err(EnvelopeError::Malformed),
         }
     }
@@ -257,6 +284,21 @@ impl<'a> Reader<'a> {
         } else {
             Err(EnvelopeError::Malformed)
         }
+    }
+}
+
+const fn review_disposition_tag(value: TaskReviewDispositionV1) -> u8 {
+    match value {
+        TaskReviewDispositionV1::Accepted => 0,
+        TaskReviewDispositionV1::RevisionRequired => 1,
+    }
+}
+
+fn decode_review_disposition(value: u8) -> Result<TaskReviewDispositionV1, EnvelopeError> {
+    match value {
+        0 => Ok(TaskReviewDispositionV1::Accepted),
+        1 => Ok(TaskReviewDispositionV1::RevisionRequired),
+        _ => Err(EnvelopeError::Malformed),
     }
 }
 fn encode_task(writer: &mut Writer, task: &TaskSpecV2) -> Result<(), EnvelopeError> {
@@ -386,6 +428,32 @@ pub(super) fn encode_command(command: &MutationV1, max: usize) -> Result<Vec<u8>
                 encode_eligibility(&mut writer, task.eligibility)?;
             }
         }
+        MutationV1::Review {
+            expected,
+            task,
+            attempt,
+            disposition,
+            evidence,
+        } => {
+            writer.byte(4)?;
+            writer.revision(*expected)?;
+            writer.reference(task)?;
+            writer.u32(*attempt)?;
+            writer.byte(review_disposition_tag(*disposition))?;
+            writer.put(&evidence.decision_sha256)?;
+            writer.put(&evidence.reviewer_sha256)?;
+            writer.put(&evidence.authority_sha256)?;
+            writer.put(&evidence.challenged_sha256)?;
+            writer.put(&evidence.criteria_sha256)?;
+            writer.put(&evidence.findings_sha256)?;
+            match evidence.feedback_sha256 {
+                None => writer.byte(0)?,
+                Some(value) => {
+                    writer.byte(1)?;
+                    writer.put(&value)?;
+                }
+            }
+        }
     }
     Ok(writer.bytes)
 }
@@ -429,6 +497,34 @@ fn decode_command(bytes: &[u8], max: usize) -> Result<MutationV1, EnvelopeError>
                 });
             }
             MutationV1::SubmitScheduledGraph { expected, tasks }
+        }
+        4 => {
+            let task = reader.reference(max)?;
+            let attempt = reader.u32()?;
+            if attempt == 0 {
+                return Err(EnvelopeError::Malformed);
+            }
+            let disposition = decode_review_disposition(reader.byte()?)?;
+            let evidence = Box::new(ReviewEvidenceV1 {
+                decision_sha256: reader.digest()?,
+                reviewer_sha256: reader.digest()?,
+                authority_sha256: reader.digest()?,
+                challenged_sha256: reader.digest()?,
+                criteria_sha256: reader.digest()?,
+                findings_sha256: reader.digest()?,
+                feedback_sha256: match reader.byte()? {
+                    0 => None,
+                    1 => Some(reader.digest()?),
+                    _ => return Err(EnvelopeError::Malformed),
+                },
+            });
+            MutationV1::Review {
+                expected,
+                task,
+                attempt,
+                disposition,
+                evidence,
+            }
         }
         _ => return Err(EnvelopeError::Malformed),
     };
@@ -667,7 +763,22 @@ mod tests {
             },
             MutationV1::Retire {
                 expected: StateRevision::Finite(24),
+                task: reference.clone(),
+            },
+            MutationV1::Review {
+                expected: StateRevision::Finite(25),
                 task: reference,
+                attempt: 2,
+                disposition: TaskReviewDispositionV1::RevisionRequired,
+                evidence: Box::new(ReviewEvidenceV1 {
+                    decision_sha256: [1; 32],
+                    reviewer_sha256: [2; 32],
+                    authority_sha256: [3; 32],
+                    challenged_sha256: [4; 32],
+                    criteria_sha256: [5; 32],
+                    findings_sha256: [6; 32],
+                    feedback_sha256: Some([7; 32]),
+                }),
             },
         ] {
             let bytes = encode_command(&command, 2048).unwrap();
@@ -699,6 +810,11 @@ mod tests {
             MutationOutcomeV1::RevisionMismatch {
                 expected: StateRevision::Finite(8),
                 actual: StateRevision::Exhausted,
+            },
+            MutationOutcomeV1::ReviewApplied {
+                revision: StateRevision::Finite(9),
+                attempt: 2,
+                disposition: TaskReviewDispositionV1::Accepted,
             },
         ] {
             let mut writer = Writer::new(19);

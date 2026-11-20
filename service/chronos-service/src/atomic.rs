@@ -70,6 +70,12 @@ pub struct AtomicSignals {
     pub executions: u64,
     pub replays: u64,
     pub lookups: u64,
+    /// Newly executed review commands only; replay and lookup do not recount.
+    pub review_executions: u64,
+    pub review_accepted: u64,
+    pub review_revision_required: u64,
+    pub review_refused: u64,
+    pub review_attempt_budget_exhausted: u64,
     pub unauthorized: u64,
     pub conflicts: u64,
     pub expired: u64,
@@ -664,6 +670,7 @@ impl<A: InvocationAuthorizer, S: ServiceEnvelopeStore> AtomicService<A, S> {
             Ok(outcome) => outcome,
             Err(refusal) => return Ok(Err(refusal)),
         };
+        record_review_outcome(&command, outcome, &mut self.signals);
         let allocation = if self.envelope_version == 2 && outcome == MutationOutcomeV1::Applied {
             let task_ids: Option<Vec<_>> = match &command {
                 MutationV1::SubmitGraph { tasks, .. } => {
@@ -813,6 +820,47 @@ impl<A: InvocationAuthorizer, S: ServiceEnvelopeStore> AtomicService<A, S> {
     }
 }
 
+fn record_review_outcome(
+    command: &MutationV1,
+    outcome: MutationOutcomeV1,
+    signals: &mut AtomicSignals,
+) {
+    use chronos_engine::TaskReviewDispositionV1;
+    use chronos_host::native_v3::MutationCodeV1;
+    if !matches!(command, MutationV1::Review { .. }) {
+        return;
+    }
+    crate::increment(&mut signals.review_executions, &mut signals.saturated);
+    match outcome {
+        MutationOutcomeV1::ReviewApplied {
+            disposition: TaskReviewDispositionV1::Accepted,
+            ..
+        } => crate::increment(&mut signals.review_accepted, &mut signals.saturated),
+        MutationOutcomeV1::ReviewApplied {
+            disposition: TaskReviewDispositionV1::RevisionRequired,
+            ..
+        } => crate::increment(
+            &mut signals.review_revision_required,
+            &mut signals.saturated,
+        ),
+        MutationOutcomeV1::Refused(code) => {
+            crate::increment(&mut signals.review_refused, &mut signals.saturated);
+            if code == MutationCodeV1::ReviewAttemptBudgetExhausted {
+                crate::increment(
+                    &mut signals.review_attempt_budget_exhausted,
+                    &mut signals.saturated,
+                );
+            }
+        }
+        MutationOutcomeV1::RevisionMismatch { .. } | MutationOutcomeV1::RevisionExhausted => {
+            crate::increment(&mut signals.review_refused, &mut signals.saturated);
+        }
+        MutationOutcomeV1::Applied => {
+            unreachable!("a review command cannot return an unbound applied receipt")
+        }
+    }
+}
+
 impl<A: InvocationAuthorizer + crate::observer::ObserverAuthorizer, S: ServiceEnvelopeStore>
     AtomicService<A, S>
 {
@@ -888,6 +936,7 @@ fn execute<A: InvocationAuthorizer>(
     use MutationCodeV1 as C;
     use chronos_engine::{
         CancelError, ConditionalError, EngineError, RetirementError, ScheduledAdmissionErrorV1,
+        TaskReviewDispositionV1, TaskReviewErrorV1,
     };
     let map = |refusal| match refusal {
         RefusalV1::Unauthorized => InvocationRefusalV1::Unauthorized,
@@ -969,6 +1018,50 @@ fn execute<A: InvocationAuthorizer>(
                 RetirementError::NotTerminal(_) => C::NotTerminal,
                 RetirementError::ReferencedBy(_) => C::ReferencedBy,
             })
+        }
+        MutationV1::Review {
+            expected,
+            task,
+            attempt,
+            disposition,
+            evidence,
+        } => {
+            if disposition == TaskReviewDispositionV1::RevisionRequired
+                && evidence.feedback_sha256.is_none()
+            {
+                MutationOutcomeV1::Refused(C::ReviewFeedbackRequired)
+            } else {
+                match service
+                    .engine
+                    .review_task_at_revision(expected, &task, attempt, disposition)
+                {
+                    Ok(receipt) => MutationOutcomeV1::ReviewApplied {
+                        revision: receipt.revision,
+                        attempt: receipt.attempt,
+                        disposition: receipt.disposition,
+                    },
+                    Err(ConditionalError::RevisionMismatch { expected, actual }) => {
+                        MutationOutcomeV1::RevisionMismatch { expected, actual }
+                    }
+                    Err(ConditionalError::RevisionExhausted) => {
+                        MutationOutcomeV1::RevisionExhausted
+                    }
+                    Err(ConditionalError::Domain(error)) => {
+                        MutationOutcomeV1::Refused(match error {
+                            TaskReviewErrorV1::TaskNotFound => C::TaskNotFound,
+                            TaskReviewErrorV1::StaleReference => C::StaleReference,
+                            TaskReviewErrorV1::StatusChanged { .. } => C::NotReadyForReview,
+                            TaskReviewErrorV1::ExecutionNotSucceeded => {
+                                C::ReviewExecutionNotSucceeded
+                            }
+                            TaskReviewErrorV1::AttemptChanged { .. } => C::ReviewAttemptChanged,
+                            TaskReviewErrorV1::AttemptBudgetExhausted => {
+                                C::ReviewAttemptBudgetExhausted
+                            }
+                        })
+                    }
+                }
+            }
         }
     })
 }

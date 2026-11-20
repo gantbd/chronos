@@ -92,6 +92,14 @@ pub fn response(reply: native::InvocationReplyV1) -> wire::Response {
                     };
                     wire::CancellationResult::Refused { code }
                 }
+                native::MutationOutcomeV1::ReviewApplied { .. } => {
+                    return wire::Response {
+                        version: 8,
+                        outcome: wire::Outcome::Refused {
+                            code: wire::RefusalCode::Unavailable,
+                        },
+                    };
+                }
             };
             wire::Outcome::CancellationResult {
                 serial: serial.to_string(),

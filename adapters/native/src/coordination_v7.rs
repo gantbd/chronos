@@ -113,6 +113,14 @@ pub fn response(reply: native::InvocationReplyV1) -> wire::Response {
                         };
                         wire::MutationResult::Refused { code }
                     }
+                    native::MutationOutcomeV1::ReviewApplied { .. } => {
+                        return wire::Response {
+                            version: 7,
+                            outcome: wire::Outcome::Refused {
+                                code: wire::RefusalCode::Unavailable,
+                            },
+                        };
+                    }
                 },
             }
         }
@@ -132,7 +140,12 @@ fn mutation_code(code: native::MutationCodeV1) -> Option<wire::MutationCode> {
                 | native::MutationCodeV1::StaleReference
                 | native::MutationCodeV1::AlreadyTerminal
                 | native::MutationCodeV1::NotTerminal
-                | native::MutationCodeV1::ReferencedBy => None,
+                | native::MutationCodeV1::ReferencedBy
+                | native::MutationCodeV1::NotReadyForReview
+                | native::MutationCodeV1::ReviewExecutionNotSucceeded
+                | native::MutationCodeV1::ReviewAttemptChanged
+                | native::MutationCodeV1::ReviewAttemptBudgetExhausted
+                | native::MutationCodeV1::ReviewFeedbackRequired => None,
             }
         };
     }

@@ -684,6 +684,274 @@ fn execute(serial: u64, command: MutationV1) -> InvocationRequestV1 {
         command,
     }
 }
+
+fn review_evidence(feedback: Option<[u8; 32]>) -> ReviewEvidenceV1 {
+    ReviewEvidenceV1 {
+        decision_sha256: [1; 32],
+        reviewer_sha256: [2; 32],
+        authority_sha256: [3; 32],
+        challenged_sha256: [4; 32],
+        criteria_sha256: [5; 32],
+        findings_sha256: [6; 32],
+        feedback_sha256: feedback,
+    }
+}
+
+#[test]
+fn revision_review_preserves_budget_then_acceptance_replays_and_releases_dependents() {
+    use chronos_engine::{Agent, CommandOutcomeV2, TaskReviewDispositionV1, TaskState};
+    use chronos_host::worker::WorkerRequestV1 as Work;
+    use std::time::{Duration, SystemTime};
+
+    let store = Store::default();
+    let mut service = service(store.clone());
+    let graph = MutationV1::SubmitGraph {
+        expected: StateRevision::ZERO,
+        tasks: vec![
+            TaskSpecV2::new("root"),
+            TaskSpecV2::new("child").depends_on("root"),
+        ],
+    };
+    service.invoke(execute(1, graph)).unwrap().unwrap();
+    let CommandOutcomeV2::AdvanceTime(Ok(time)) = service
+        .dispatch_worker(Work::AdvanceTime {
+            now: SystemTime::UNIX_EPOCH,
+        })
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("time expected")
+    };
+    let CommandOutcomeV2::IssueGrant(Ok(grant)) = service
+        .dispatch_worker(Work::IssueGrant {
+            agent: Agent::new("worker"),
+            time: time.clone(),
+            validity_duration: Duration::from_secs(60),
+            claim_budget: None,
+        })
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("grant expected")
+    };
+    let CommandOutcomeV2::ClaimTask(Ok(claimed)) = service
+        .dispatch_worker(Work::ClaimTask {
+            expected: StateRevision::Finite(1),
+            grant: grant.clone(),
+            task_id: "root".into(),
+            time: time.clone(),
+            lease_duration: Duration::from_secs(30),
+        })
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("claim expected")
+    };
+    let lease = match claimed.state {
+        TaskState::Running(claim) => claim.lease,
+        state => panic!("running task expected, got {state:?}"),
+    };
+    assert!(matches!(
+        service
+            .dispatch_worker(Work::Complete {
+                task_id: "root".into(),
+                lease,
+                time: time.clone(),
+            })
+            .unwrap()
+            .unwrap(),
+        CommandOutcomeV2::Complete(Ok(()))
+    ));
+    let Ok(ResponseV1::Snapshot(Some(root))) = service
+        .dispatch(RequestV1::Snapshot {
+            task: "root".into(),
+        })
+        .unwrap()
+    else {
+        panic!("root expected")
+    };
+    let Ok(ResponseV1::Snapshot(Some(child))) = service
+        .dispatch(RequestV1::Snapshot {
+            task: "child".into(),
+        })
+        .unwrap()
+    else {
+        panic!("child expected")
+    };
+    assert_eq!(child.task.status, chronos_engine::TaskStatusV1::Blocked);
+
+    let revision_command = MutationV1::Review {
+        expected: root.revision,
+        task: root.reference,
+        attempt: 1,
+        disposition: TaskReviewDispositionV1::RevisionRequired,
+        evidence: Box::new(review_evidence(Some([7; 32]))),
+    };
+    assert!(matches!(
+        service
+            .invoke(execute(2, revision_command))
+            .unwrap()
+            .unwrap(),
+        InvocationResponseV1::Outcome {
+            serial: 2,
+            result: MutationOutcomeV1::ReviewApplied {
+                attempt: 1,
+                disposition: TaskReviewDispositionV1::RevisionRequired,
+                ..
+            }
+        }
+    ));
+    let Ok(ResponseV1::Snapshot(Some(root))) = service
+        .dispatch(RequestV1::Snapshot {
+            task: "root".into(),
+        })
+        .unwrap()
+    else {
+        panic!("reopened root expected")
+    };
+    assert_eq!(root.task.status, chronos_engine::TaskStatusV1::Open);
+    assert_eq!(root.task.attempt_number, None);
+    let Ok(ResponseV1::Snapshot(Some(child))) = service
+        .dispatch(RequestV1::Snapshot {
+            task: "child".into(),
+        })
+        .unwrap()
+    else {
+        panic!("held child expected")
+    };
+    assert_eq!(child.task.status, chronos_engine::TaskStatusV1::Blocked);
+    let CommandOutcomeV2::ClaimTask(Ok(claimed)) = service
+        .dispatch_worker(Work::ClaimTask {
+            expected: root.revision,
+            grant,
+            task_id: "root".into(),
+            time: time.clone(),
+            lease_duration: Duration::from_secs(30),
+        })
+        .unwrap()
+        .unwrap()
+    else {
+        panic!("second claim expected")
+    };
+    let lease = match claimed.state {
+        TaskState::Running(claim) => claim.lease,
+        state => panic!("second running task expected, got {state:?}"),
+    };
+    assert!(matches!(
+        service
+            .dispatch_worker(Work::Complete {
+                task_id: "root".into(),
+                lease,
+                time,
+            })
+            .unwrap()
+            .unwrap(),
+        CommandOutcomeV2::Complete(Ok(()))
+    ));
+    let Ok(ResponseV1::Snapshot(Some(root))) = service
+        .dispatch(RequestV1::Snapshot {
+            task: "root".into(),
+        })
+        .unwrap()
+    else {
+        panic!("second review root expected")
+    };
+    let command = MutationV1::Review {
+        expected: root.revision,
+        task: root.reference,
+        attempt: 2,
+        disposition: TaskReviewDispositionV1::Accepted,
+        evidence: Box::new(review_evidence(None)),
+    };
+    let expected = service.invoke(execute(3, command.clone())).unwrap();
+    let Ok(InvocationResponseV1::Outcome {
+        serial: 3,
+        result:
+            MutationOutcomeV1::ReviewApplied {
+                revision,
+                attempt: 2,
+                disposition: TaskReviewDispositionV1::Accepted,
+            },
+    }) = expected
+    else {
+        panic!("review receipt expected: {expected:?}")
+    };
+    let Ok(ResponseV1::Snapshot(Some(child))) = service
+        .dispatch(RequestV1::Snapshot {
+            task: "child".into(),
+        })
+        .unwrap()
+    else {
+        panic!("child expected")
+    };
+    assert_eq!(child.revision, revision);
+    assert_eq!(child.task.status, chronos_engine::TaskStatusV1::Open);
+    let MutationV1::Review { task, .. } = &command else {
+        unreachable!()
+    };
+    assert!(matches!(
+        service
+            .invoke(execute(
+                4,
+                MutationV1::Review {
+                    expected: revision,
+                    task: task.clone(),
+                    attempt: 2,
+                    disposition: TaskReviewDispositionV1::Accepted,
+                    evidence: Box::new(review_evidence(None)),
+                },
+            ))
+            .unwrap()
+            .unwrap(),
+        InvocationResponseV1::Outcome {
+            serial: 4,
+            result: MutationOutcomeV1::Refused(MutationCodeV1::NotReadyForReview)
+        }
+    ));
+    let stale_command = MutationV1::Review {
+        expected: StateRevision::ZERO,
+        task: task.clone(),
+        attempt: 2,
+        disposition: TaskReviewDispositionV1::Accepted,
+        evidence: Box::new(review_evidence(None)),
+    };
+    let stale_expected = service.invoke(execute(5, stale_command.clone())).unwrap();
+    assert!(matches!(
+        stale_expected.unwrap(),
+        InvocationResponseV1::Outcome {
+            serial: 5,
+            result: MutationOutcomeV1::RevisionMismatch { .. }
+        }
+    ));
+    let signals = service.signals();
+    assert_eq!(signals.review_executions, 4);
+    assert_eq!(signals.review_revision_required, 1);
+    assert_eq!(signals.review_accepted, 1);
+    assert_eq!(signals.review_refused, 2);
+    assert_eq!(signals.review_attempt_budget_exhausted, 0);
+    drop(service);
+
+    let mut reopened = AtomicService::open_existing(
+        store,
+        Policy { release: true },
+        Limits {
+            max_graph_tasks: 4,
+            max_page_entries: 4,
+        },
+        recovery(),
+        limits(),
+    )
+    .unwrap();
+    assert_eq!(
+        reopened
+            .invoke(InvocationRequestV1::LookupCommand {
+                invocation: id(5),
+                command: stale_command,
+            })
+            .unwrap(),
+        stale_expected
+    );
+}
 #[test]
 fn lost_reply_lookup_and_identical_replay_survive_restart_without_a_second_commit() {
     let store = Store::default();

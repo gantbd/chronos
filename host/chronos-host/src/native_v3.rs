@@ -1,5 +1,21 @@
 //! Opt-in durable invocation contract. Correlation is not a credential.
-use chronos_engine::{ScheduledTaskSpecV1, StateRevision, TaskRefV1, TaskSpecV2};
+use chronos_engine::{
+    ScheduledTaskSpecV1, StateRevision, TaskRefV1, TaskReviewDispositionV1, TaskSpecV2,
+};
+
+/// Content-free identities for the exact human review packet. The authority,
+/// challenged result, criteria and findings remain owned by their source
+/// systems; Chronos retains their immutable SHA-256 bindings with the command.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ReviewEvidenceV1 {
+    pub decision_sha256: [u8; 32],
+    pub reviewer_sha256: [u8; 32],
+    pub authority_sha256: [u8; 32],
+    pub challenged_sha256: [u8; 32],
+    pub criteria_sha256: [u8; 32],
+    pub findings_sha256: [u8; 32],
+    pub feedback_sha256: Option<[u8; 32]>,
+}
 
 /// A caller-selected intent key paired with the observed next serial. A serial
 /// is consumed only by an admitted invocation. Competing serials conflict;
@@ -34,6 +50,13 @@ pub enum MutationV1 {
         expected: StateRevision,
         task: TaskRefV1,
     },
+    Review {
+        expected: StateRevision,
+        task: TaskRefV1,
+        attempt: u32,
+        disposition: TaskReviewDispositionV1,
+        evidence: Box<ReviewEvidenceV1>,
+    },
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
@@ -57,9 +80,14 @@ pub enum MutationCodeV1 {
     NotTerminal,
     ReferencedBy,
     SchedulingNotEnabled,
+    NotReadyForReview,
+    ReviewExecutionNotSucceeded,
+    ReviewAttemptChanged,
+    ReviewAttemptBudgetExhausted,
+    ReviewFeedbackRequired,
 }
 impl MutationCodeV1 {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 24] = [
         Self::InvalidTaskId,
         Self::DuplicateTask,
         Self::UnknownDependency,
@@ -79,6 +107,11 @@ impl MutationCodeV1 {
         Self::NotTerminal,
         Self::ReferencedBy,
         Self::SchedulingNotEnabled,
+        Self::NotReadyForReview,
+        Self::ReviewExecutionNotSucceeded,
+        Self::ReviewAttemptChanged,
+        Self::ReviewAttemptBudgetExhausted,
+        Self::ReviewFeedbackRequired,
     ];
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,6 +123,11 @@ pub enum MutationOutcomeV1 {
     },
     RevisionExhausted,
     Refused(MutationCodeV1),
+    ReviewApplied {
+        revision: StateRevision,
+        attempt: u32,
+        disposition: TaskReviewDispositionV1,
+    },
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvocationRefusalV1 {
