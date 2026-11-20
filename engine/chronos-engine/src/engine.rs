@@ -575,8 +575,8 @@ impl Engine {
             TaskState::Uncertain { attempt_number, .. } => {
                 (TaskPhase::Uncertain, Some(*attempt_number))
             }
-            TaskState::Succeeded => (TaskPhase::Succeeded, None),
-            TaskState::Failed { .. } => (TaskPhase::Failed, None),
+            TaskState::Succeeded => (TaskPhase::Succeeded, Some(task.attempts)),
+            TaskState::Failed { .. } => (TaskPhase::Failed, Some(task.attempts)),
             TaskState::Cancelled => (TaskPhase::Cancelled, None),
         };
         Some(TaskProjection {

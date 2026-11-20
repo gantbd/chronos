@@ -207,6 +207,29 @@ fn task_snapshots_are_content_minimized_and_transfer_no_lease_authority() {
 }
 
 #[test]
+fn terminal_task_snapshots_retain_the_attempt_number_without_lease_authority() {
+    let now = SystemTime::UNIX_EPOCH;
+    let mut engine = Engine::new();
+    engine.submit(Task::new("result", "result")).unwrap();
+    let grant = engine
+        .issue_grant(Agent::new("agent"), now, Duration::from_secs(60))
+        .unwrap();
+    let claimed = engine
+        .claim_next(&grant, now, Duration::from_secs(30))
+        .unwrap()
+        .unwrap();
+    let lease = lease(&claimed);
+
+    engine.complete(&claimed.id, &lease, now).unwrap();
+
+    let snapshot = engine.task_snapshot(&claimed.id).unwrap();
+    assert_eq!(snapshot.phase, TaskPhase::Succeeded);
+    assert_eq!(snapshot.attempt_number, Some(1));
+    let debug = format!("{snapshot:?}");
+    assert!(!debug.contains("agent"));
+}
+
+#[test]
 fn one_grant_can_be_revoked_without_revoking_an_unrelated_grant() {
     let now = SystemTime::UNIX_EPOCH;
     let mut engine = Engine::new();
